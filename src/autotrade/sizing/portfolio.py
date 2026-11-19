@@ -42,6 +42,59 @@ def gap_allowance(panel: Panel, symbol: str, asof: pd.Timestamp, lookback: int =
     return float(np.quantile(gap.clip(lower=0.0).to_numpy(), 0.95))
 
 
+class RiskState:
+    """Pocket entry gates on prior-close equity, carried across trading days.
+
+    `begin_day()` before the day's entries sets `latched` (sticky drawdown stop: prior-close
+    equity <= peak * (1 - drawdown_stop)) and `day_loss` (prior day's return <=
+    -daily_loss_stop); `end_day(equity)` records that day's close-marked equity."""
+
+    def __init__(self, pocket: PocketConfig, equity: float):
+        self.pocket = pocket
+        self.prev_eq = self.prev_prev_eq = self.peak = equity
+        self.latched = False
+        self.day_loss = False
+
+    def begin_day(self) -> None:
+        if self.pocket.drawdown_stop and \
+                self.prev_eq <= self.peak * (1 - self.pocket.drawdown_stop):
+            self.latched = True
+        self.day_loss = self.prev_eq / self.prev_prev_eq - 1 <= -self.pocket.daily_loss_stop
+
+    def end_day(self, equity: float) -> None:
+        self.prev_prev_eq, self.prev_eq = self.prev_eq, equity
+        self.peak = max(self.peak, equity)
+
+
+def decide_entry(risk: RiskState, n_open: int, cash: float, symbol: str, entry_price: float,
+                 stop_pct: float, confidence: float, gap: float, cost_model: CostModel,
+                 fractional: bool) -> tuple[float, float, str | None]:
+    """Size one entry candidate -> (qty, buy_cash, skip_reason or None).
+
+    qty = min(equity * risk_per_trade * confidence / (price * (stop_pct + gap)),
+              equity * max_position_weight / price), floored unless fractional; equity is
+    the prior-close mark. Skip precedence: drawdown_stop, daily_loss_stop, max_positions,
+    too_small, cash."""
+    pocket = risk.pocket
+    if risk.latched:
+        return 0.0, 0.0, "drawdown_stop"
+    if risk.day_loss:
+        return 0.0, 0.0, "daily_loss_stop"
+    if pocket.max_positions is not None and n_open >= pocket.max_positions:
+        return 0.0, 0.0, "max_positions"
+    eq = risk.prev_eq
+    risk_qty = eq * pocket.risk_per_trade * confidence / (entry_price * (stop_pct + gap))
+    qty = min(risk_qty, eq * pocket.max_position_weight / entry_price)
+    if not fractional:
+        qty = float(np.floor(qty))
+    if not qty > 0:
+        return qty, 0.0, "too_small"
+    buy_cash = cost_model.fill_cash(symbol, "buy", qty, entry_price)
+    if buy_cash > cash:
+        return qty, buy_cash, "cash"
+    return qty, buy_cash, None
+
+
 def run_portfolio(candidates: pd.DataFrame, panel: Panel, cost_model: CostModel,
                   pocket: PocketConfig, capital: float, currency_per_krw: float,
                   fractional: bool) -> PortfolioResult:
@@ -66,18 +119,14 @@ def run_portfolio(candidates: pd.DataFrame, panel: Panel, cost_model: CostModel,
         by_exit.setdefault(d, []).append(i)
 
     cash = cap0
-    peak = cap0
-    prev_eq, prev_prev_eq = cap0, cap0
-    latched = False
+    risk = RiskState(pocket, cap0)
     open_pos: dict[int, dict] = {}
     fills: list[dict] = []
     skipped: list[dict] = []
     eq_values: list[float] = []
 
     for d in dates:
-        if pocket.drawdown_stop and prev_eq <= peak * (1 - pocket.drawdown_stop):
-            latched = True
-        day_loss = prev_eq / prev_prev_eq - 1 <= -pocket.daily_loss_stop
+        risk.begin_day()
 
         for i in by_exit.get(d, []):
             pos = open_pos.pop(i, None)
@@ -93,27 +142,9 @@ def run_portfolio(candidates: pd.DataFrame, panel: Panel, cost_model: CostModel,
         if d in by_entry:
             day = by_entry[d].sort_values("confidence", ascending=False, kind="stable")
             for i, t in day.iterrows():
-                reason = None
-                qty = 0.0
-                if latched:
-                    reason = "drawdown_stop"
-                elif day_loss:
-                    reason = "daily_loss_stop"
-                elif pocket.max_positions is not None and len(open_pos) >= pocket.max_positions:
-                    reason = "max_positions"
-                else:
-                    gap = gap_allowance(panel, t.symbol, d)
-                    risk_qty = (prev_eq * pocket.risk_per_trade * t.confidence
-                                / (t.entry_price * (t.stop_pct + gap)))
-                    qty = min(risk_qty, prev_eq * pocket.max_position_weight / t.entry_price)
-                    if not fractional:
-                        qty = float(np.floor(qty))
-                    if not qty > 0:
-                        reason = "too_small"
-                    else:
-                        buy_cash = cost_model.fill_cash(t.symbol, "buy", qty, t.entry_price)
-                        if buy_cash > cash:
-                            reason = "cash"
+                qty, buy_cash, reason = decide_entry(
+                    risk, len(open_pos), cash, t.symbol, t.entry_price, t.stop_pct,
+                    t.confidence, gap_allowance(panel, t.symbol, d), cost_model, fractional)
                 if reason:
                     skipped.append({**t.to_dict(), "reason": reason})
                 else:
@@ -127,8 +158,7 @@ def run_portfolio(candidates: pd.DataFrame, panel: Panel, cost_model: CostModel,
                 px = cands.at[i, "entry_price"]
             value += pos["qty"] * px
         eq_values.append(value)
-        prev_prev_eq, prev_eq = prev_eq, value
-        peak = max(peak, value)
+        risk.end_day(value)
 
     equity = pd.Series(eq_values, index=pd.DatetimeIndex(dates, name="date"), name="equity")
     fills_df = pd.DataFrame(fills, columns=FILL_COLUMNS).sort_values(

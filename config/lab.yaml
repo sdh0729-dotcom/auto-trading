@@ -1,0 +1,15 @@
+split: [0.6, 0.2, 0.2]
+swing_start: 2016-01-01
+capital: {real: 50000, paper: 5000000}
+universe_top_n: 200
+adv_window: 20
+criteria:
+  t_min: 2.0
+  dsr_min: 0.95
+  pbo_max: 0.5
+  top_removed_n: 5
+  pf_min: 1.2
+  mdd_max: 0.15
+  min_trades: 100
+  max_final_candidates: 3
+  cost_r_max: 0.15

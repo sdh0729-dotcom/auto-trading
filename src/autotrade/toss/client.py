@@ -17,9 +17,9 @@ from autotrade.toss.ratelimit import RateLimiter
 __all__ = ["BASE", "TossApiError", "TossClient", "CandlePage", "make_client_from_env", "RATES"]
 
 # Per-second limits (Rate Limits Group per endpoint, from docs/toss/openapi.json).
-# MARKET_INFO's value is not published in the vendored docs; 5 is a conservative guess.
+# MARKET_INFO 3/s per Toss overview Rate Limits table.
 RATES = {"MARKET_DATA_CHART": 20, "MARKET_DATA": 15, "STOCK_ALL": 1, "STOCK": 5,
-         "ORDER_INFO": 6, "MARKET_INFO": 5, "AUTH": 5}
+         "ORDER_INFO": 6, "MARKET_INFO": 3, "AUTH": 5}
 MAX_ATTEMPTS = 5
 CANDLE_COLS = ["timestamp", "open", "high", "low", "close", "volume"]
 

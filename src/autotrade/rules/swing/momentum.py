@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+import itertools
+
+import numpy as np
+
+from autotrade.rules.base import BaseRule, atr_stop, finalize
+from autotrade.types import Panel, Signals
+
+LOOKBACK = [21, 63]
+REBALANCE = [10, 20]  # trading days (global cap: hold <= 20, so not calendar-monthly)
+TOP_K = [1, 2, 3, 4]
+K = [2.0]
+
+
+class Momentum(BaseRule):
+    """Every `rebalance`-th row: enter top-k by lookback return; exit everything outside top-k.
+
+    max_hold_days = rebalance. Rebalance rows are positional (i % rebalance == 0).
+    """
+    family = "momentum"
+    PARAM_KEYS = ("lookback", "rebalance", "top_k", "k")
+
+    @classmethod
+    def grid(cls):
+        return [{"lookback": lb, "rebalance": rb, "top_k": tk, "k": k}
+                for lb, rb, tk, k in itertools.product(LOOKBACK, REBALANCE, TOP_K, K)]
+
+    def signals(self, panel: Panel) -> Signals:
+        lb, rb, tk, k = (self.params[x] for x in self.PARAM_KEYS)
+        c = panel.close
+        ret = c / c.shift(lb) - 1
+        rank = ret.rank(axis=1, ascending=False, method="first")
+        is_reb = np.arange(len(c)) % rb == 0
+        reb = c.copy().astype(bool)
+        reb.loc[:, :] = is_reb[:, None]
+        top = (rank <= tk) & reb
+        exits = reb & ~(rank <= tk)
+        conf = (tk - rank + 1) / tk
+        return finalize(panel, top, exits, atr_stop(panel, k), conf,
+                        "next_open", "next_open", rb)

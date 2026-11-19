@@ -69,3 +69,13 @@ class CostModel:
         out["net_return"] = pd.Series(net, index=out.index, dtype=float)
         out["net_r"] = out["net_return"] / out["stop_pct"]
         return out
+
+    def fill_cash(self, symbol: str, side: str, qty: float, price: float) -> float:
+        """Cash for `qty` at signal `price`: buy -> paid (fill + commission);
+        sell -> received (fill - commission - sell tax - SEC fee)."""
+        if side == "buy":
+            return qty * self.buy_fill(symbol, price) * (1 + self.commission)
+        if side == "sell":
+            return qty * self.sell_fill(symbol, price) * (
+                1 - self.commission - self._sell_tax(symbol) - self.sec_fee)
+        raise ValueError(f"side must be 'buy' or 'sell', got {side!r}")

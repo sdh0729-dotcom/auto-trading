@@ -1,6 +1,6 @@
 .superpowers/
 .worktrees/
-data/
+/data/
 .env
 .venv/
 config/synced.yaml

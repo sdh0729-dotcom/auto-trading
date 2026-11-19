@@ -1,0 +1,193 @@
+from datetime import date
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from autotrade.data.collect import collect_daily, collect_meta
+from autotrade.data.quality import check_daily
+from autotrade.data.store import load_daily, load_meta, load_panel, save_daily
+from autotrade.toss.client import CandlePage, TossApiError
+from tests.fixtures import make_panel
+
+
+class FakeClient:
+    """Serves 1d candles newest-first pages; `before` is inclusive like the real API."""
+
+    def __init__(self, first="2015-06-01", last="2026-11-19", tz="+09:00", hour=0):
+        days = pd.bdate_range(first, last)
+        self.tz, self.hour = tz, hour
+        self.days = [d.strftime("%Y-%m-%d") for d in days]
+        self.pages_requested_last_run = 0
+        self.not_found = False
+        self.stocks = {}
+
+    def _bar(self, d, i):
+        ts = pd.Timestamp(f"{d}T{self.hour:02d}:00:00{self.tz}")
+        p = 100.0 + i % 50
+        return {"timestamp": ts, "open": p, "high": p + 1, "low": p - 1, "close": p + 0.5,
+                "volume": 1000.0 + i}
+
+    def add_new_day(self, d):
+        self.days.append(d)
+
+    def get_candles(self, symbol, interval, before=None, count=200, adjusted=True):
+        if self.not_found:
+            raise TossApiError(404, "stock-not-found", "r1")
+        if before is None:
+            self.pages_requested_last_run = 0
+        self.pages_requested_last_run += 1
+        bars = [self._bar(d, i) for i, d in enumerate(self.days)]
+        if before is not None:
+            bars = [b for b in bars if b["timestamp"] <= before]
+        page = bars[-count:]
+        df = pd.DataFrame(page, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        more = len(bars) > len(page)
+        nb = page[0]["timestamp"].to_pydatetime() if more else None  # inclusive boundary
+        return CandlePage(df, nb)
+
+    def list_stocks(self, market, status="ACTIVE", security_type=None):
+        rows = [
+            ("005930", "삼성전자", "STOCK", True), ("005935", "삼성전자우", "STOCK", False),
+            ("069500", "KODEX 200", "ETF", True), ("500001", "SomeETN", "ETN", True),
+            ("600001", "Warrant", "WARRANT", True),
+        ]
+        if status == "DELISTED":
+            rows = [("999999", "폐지", "STOCK", True)]
+        if market == "KOSDAQ":
+            rows = [("A" + r[0], *r[1:]) for r in rows]
+        return pd.DataFrame([{"symbol": s, "name": n, "security_type": t,
+                              "is_common_share": c, "isin": "X"} for s, n, t, c in rows])
+
+
+@pytest.fixture
+def tmp_data(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTOTRADE_DATA", str(tmp_path))
+    return tmp_path
+
+
+@pytest.fixture
+def fake_client():
+    return FakeClient()
+
+
+def good_df(n=10):
+    idx = pd.bdate_range("2024-01-02", periods=n)
+    return pd.DataFrame({"open": 10.0, "high": 12.0, "low": 9.0, "close": 11.0,
+                         "volume": 100.0}, index=idx)
+
+
+def test_collect_paginates_until_start(fake_client, tmp_data):
+    n = collect_daily(fake_client, "kr", "005930", start=date(2016, 1, 1))
+    df = load_daily("kr", "005930")
+    assert n == len(df) > 400  # more than two pages
+    assert fake_client.pages_requested_last_run >= 3
+    assert df.index.min() >= pd.Timestamp("2016-01-01")
+    assert df.index.is_monotonic_increasing and not df.index.duplicated().any()
+    assert set(df["source"]) == {"toss"}
+
+
+def test_inclusive_before_boundary_not_duplicated(fake_client, tmp_data):
+    collect_daily(fake_client, "kr", "005930", start=date(2016, 1, 1))
+    assert not load_daily("kr", "005930").index.duplicated().any()
+
+
+def test_incremental_fetches_only_newer(fake_client, tmp_data):
+    collect_daily(fake_client, "kr", "005930", start=date(2016, 1, 1))
+    before_len = len(load_daily("kr", "005930"))
+    fake_client.add_new_day("2026-11-20")
+    assert collect_daily(fake_client, "kr", "005930", start=date(2016, 1, 1)) == 1
+    assert fake_client.pages_requested_last_run == 1
+    assert len(load_daily("kr", "005930")) == before_len + 1
+    assert collect_daily(fake_client, "kr", "005930", start=date(2016, 1, 1)) == 0
+
+
+def test_start_exactly_on_bar_stops_without_extra_page(tmp_data):
+    c = FakeClient(first="2015-01-01")
+    collect_daily(c, "kr", "X", start=date(2016, 1, 4))  # 2016-01-04 is a trading day
+    assert load_daily("kr", "X").index.min() == pd.Timestamp("2016-01-04")
+
+
+def test_stock_not_found_returns_zero(fake_client, tmp_data, caplog):
+    fake_client.not_found = True
+    assert collect_daily(fake_client, "kr", "NOPE", start=date(2016, 1, 1)) == 0
+    assert load_daily("kr", "NOPE") is None
+    assert "stock-not-found" in caplog.text
+
+
+def test_us_timestamps_become_new_york_dates(tmp_data):
+    # 13:00+09:00 (EDT, summer) and 14:00+09:00 (EST, winter) are both NY midnight
+    summer = FakeClient(first="2026-03-23", last="2026-03-25", hour=13)
+    collect_daily(summer, "us", "SPY", start=date(2026, 1, 1))
+    assert list(load_daily("us", "SPY").index) == list(pd.to_datetime(
+        ["2026-03-23", "2026-03-24", "2026-03-25"]))
+    winter = FakeClient(first="2026-01-06", last="2026-01-08", hour=14)
+    collect_daily(winter, "us", "QQQ", start=date(2026, 1, 1))
+    assert list(load_daily("us", "QQQ").index) == list(pd.to_datetime(
+        ["2026-01-06", "2026-01-07", "2026-01-08"]))
+
+
+def test_kr_timestamps_are_seoul_dates(tmp_data):
+    c = FakeClient(first="2026-03-24", last="2026-03-25")
+    collect_daily(c, "kr", "A", start=date(2026, 1, 1))
+    assert list(load_daily("kr", "A").index) == list(pd.to_datetime(["2026-03-24", "2026-03-25"]))
+
+
+def test_quality_flags():
+    bad = good_df().copy()
+    bad.loc[bad.index[3], "high"] = bad["low"].iloc[3] - 1
+    assert any("ohlc" in s for s in check_daily(bad))
+    assert check_daily(good_df()) == []
+
+
+def test_quality_other_problems():
+    d = good_df()
+    dup = pd.concat([d, d.iloc[[2]]])
+    assert any("duplicate" in s for s in check_daily(dup))
+    d2 = good_df()
+    d2.loc[d2.index[1], "low"] = 0.0
+    assert any("non-positive" in s for s in check_daily(d2))
+    d3 = good_df()
+    d3.loc[d3.index[1], "volume"] = -1.0
+    assert any("negative volume" in s for s in check_daily(d3))
+    gap = pd.concat([good_df(3), good_df(3).set_axis(pd.bdate_range("2024-03-01", periods=3))])
+    assert any("gap" in s for s in check_daily(gap))
+
+
+def test_meta_excludes_preferred_etn_and_maps_product(fake_client, tmp_data):
+    meta = collect_meta(fake_client, "kr")
+    assert set(meta["product"]) <= {"stock", "etf"}
+    assert "ETN" not in set(meta["security_type"])
+    assert "WARRANT" not in set(meta["security_type"])
+    assert meta.loc["069500", "product"] == "etf"
+    assert not meta.loc["005935", "is_common_share"]  # preferred kept, flagged
+    assert meta.loc["999999", "delisted"] and not meta.loc["005930", "delisted"]
+    assert set(meta["market_board"]) == {"KOSPI", "KOSDAQ"}
+    assert load_meta("kr").equals(meta)
+
+
+def test_load_panel_nan_for_missing_days(tmp_data):
+    a, b = good_df(5), good_df(5).iloc[1:]
+    save_daily("kr", "A", a)
+    save_daily("kr", "B", b)
+    p = load_panel("kr", ["A", "B"], date(2024, 1, 1), date(2024, 12, 31))
+    assert p.symbols == ["A", "B"] and len(p.close) == 5
+    assert np.isnan(p.close.loc[a.index[0], "B"]) and p.close.loc[a.index[1], "B"] == 11.0
+    assert list(p.meta.index) == ["A", "B"]
+    p2 = load_panel("kr", None, date(2024, 1, 3), date(2024, 1, 4))
+    assert len(p2.close) == 2
+
+
+def test_make_panel_properties_and_overrides():
+    p = make_panel(50, ["A", "B"], seed=1, products={"B": "etf"},
+                   name={"A": "스팩1호"}, is_common_share={"A": False})
+    assert p.close.shape == (50, 2) and p.close.index.tz is None
+    assert (p.high >= np.maximum(p.open, p.close)).all().all()
+    assert (p.low <= np.minimum(p.open, p.close)).all().all()
+    assert (p.low > 0).all().all()
+    assert p.meta.loc["A", "name"] == "스팩1호" and not p.meta.loc["A", "is_common_share"]
+    assert p.meta.loc["B", "product"] == "etf" and p.meta.loc["B", "security_type"] == "ETF"
+    assert p.meta.loc["A", "source"] == "synthetic" and not p.meta.loc["A", "delisted"]
+    q = make_panel(50, ["A", "B"], seed=1)
+    assert p.close.equals(q.close)

@@ -198,3 +198,9 @@ def test_make_client_from_env_ok(monkeypatch, tmp_path):
     monkeypatch.setenv("TOSS_CLIENT_ID", "cid")
     monkeypatch.setenv("TOSS_CLIENT_SECRET", "csec")
     assert isinstance(make_client_from_env(tmp_path / "t.json"), TossClient)
+
+
+def test_rate_table_pinned():
+    from autotrade.toss.client import RATES
+    assert RATES == {"MARKET_DATA_CHART": 20, "MARKET_DATA": 15, "STOCK_ALL": 1, "STOCK": 5,
+                     "ORDER_INFO": 6, "MARKET_INFO": 3, "AUTH": 5}

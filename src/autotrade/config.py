@@ -57,6 +57,7 @@ class MarketConfig:
     min_price: float | None = None
     min_avg_volume_14d: int | None = None
     commission_rate: float | None = None
+    fractional_orders: bool = False
 
 
 @dataclass(frozen=True)

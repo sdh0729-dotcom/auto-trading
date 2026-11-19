@@ -15,3 +15,4 @@ session_close: "15:30"
 closing_auction_start: "15:20"
 exclude_name_keywords: ["레버리지", "인버스", "2X", "스팩"]
 delisted_supplement: true
+fractional_orders: false

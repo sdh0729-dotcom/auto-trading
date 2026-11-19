@@ -27,6 +27,7 @@ def test_kr_market_values(synced):
     assert m.max_tick_cost_pct == 0.001
     assert m.always_include == ["069500", "102110"]
     assert m.commission_rate == 0.00015
+    assert m.fractional_orders is False
 
 
 def test_us_market_values(synced):
@@ -36,6 +37,7 @@ def test_us_market_values(synced):
     assert m.min_price == 5.0 and m.min_avg_volume_14d == 1_000_000
     assert m.always_include == ["SPY", "QQQ"]
     assert m.sell_tax_rate == {"stock": 0.0, "etf": 0.0}
+    assert m.fractional_orders is True
 
 
 def test_market_raw_has_no_commission_and_replace_works():

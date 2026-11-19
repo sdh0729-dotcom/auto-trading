@@ -7,10 +7,12 @@ Fill rules (brief, Task 9):
   previous exit row (no same-row exit-and-reenter). A `close` entry on the window's last
   row is not taken (it could only be closed at the same price).
 - stop = entry_price * (1 - stop_pct[t]); stop_pct / confidence are the signal-row values.
-- On each later bar, in order: (1) open <= stop -> `gap_stop` at open; (2) low <= stop ->
-  `stop` at the stop price; (3) exit signal -> `signal` (exit_at="close": close of the signal
-  row; exit_at="next_open": open of the following bar, still after that bar's (1)(2));
-  (4) held rows since entry (entry row = 0) >= max_hold_days -> `max_hold` at close.
+- On each later bar, in physical order: (1) open <= stop -> `gap_stop` at open; then, if an
+  exit_at="next_open" signal from the previous bar is pending, it fills at this open ->
+  `signal` (no intrabar stop check on such a bar, the position is already gone);
+  (2) low <= stop -> `stop` at the stop price; (3) exit_at="close" signal -> `signal` at the
+  signal row's close; (4) held rows since entry (entry row = 0) >= max_hold_days -> `max_hold`
+  at close.
 - A `next_open` entry bar is checked from (2) on. A `close` entry bar is not price-checked;
   only an exit_at="next_open" signal on it is registered (fills at the next open).
 - Still open on the last row of the window -> `period_end` at that close. A bar with a
@@ -98,10 +100,12 @@ def _hold(col, e: int, price: float, stop: float, next_open_entry: bool,
             return last_row, last_close, "period_end"
         if r > e and o[r] <= stop:                               # (1) not on entry bar
             return r, o[r], "gap_stop"
-        if l[r] <= stop:                                         # (2)
-            return r, stop, "stop"
+        # Physical order: a pending next_open exit sells at this bar's open (after the gap
+        # check, same price) before any intrabar stop on this bar can happen.
         if pending:                                              # (3) next_open exit
             return r, o[r], "signal"
+        if l[r] <= stop:                                         # (2)
+            return r, stop, "stop"
         if exits[r] and not next_open_exit:                      # (3) close exit
             return r, c[r], "signal"
         if r - e >= max_hold:                                    # (4)

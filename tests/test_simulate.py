@@ -128,16 +128,21 @@ def test_close_entry_without_exit_signal_hits_max_hold():
     assert (t["exit_date"], t["exit_price"], t["exit_reason"]) == (D[2], 102.0, "max_hold")
 
 
-def test_pending_open_exit_does_not_preempt_stops():
+def test_pending_open_exit_fills_at_open_in_physical_order():
     # exit signal d3 -> would sell at open d4; but d4 gaps below the stop -> gap_stop
     p = bars([FLAT, FLAT, FLAT, FLAT, (93, 96, 92, 95)])
     t = only(simulate(p, sigs(p, entries=[1], exits=[3]), all_true(p), START, END))
     assert (t["exit_date"], t["exit_price"], t["exit_reason"]) == (D[4], 93.0, "gap_stop")
-    # brief order (1)(2)(3): the intraday stop (2) is checked before the open signal exit (3)
+    # physical order: open above the stop -> the pending exit sells at the open (99) before the
+    # bar's low (94) could touch the stop; no intrabar stop on that bar
     p = bars([FLAT, FLAT, FLAT, FLAT, (99, 100, 94, 96)])
     t = only(simulate(p, sigs(p, entries=[1], exits=[3]), all_true(p), START, END))
-    assert (t["exit_date"], t["exit_reason"]) == (D[4], "stop")
-    assert t["exit_price"] == pytest.approx(95.0)
+    assert (t["exit_date"], t["exit_price"], t["exit_reason"]) == (D[4], 99.0, "signal")
+    # overnight variant: close entry 100, next open 97 (> stop 95), low 90 -> signal at 97
+    p = bars([FLAT, FLAT, (97, 98, 90, 92)])
+    s = sigs(p, entries=[1], exits=range(8), entry_at="close", exit_at="next_open", max_hold=1)
+    t = only(simulate(p, s, all_true(p), START, END))
+    assert (t["exit_date"], t["exit_price"], t["exit_reason"]) == (D[2], 97.0, "signal")
 
 
 def test_max_hold_exit():

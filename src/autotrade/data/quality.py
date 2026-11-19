@@ -28,3 +28,8 @@ def check_daily(df: pd.DataFrame) -> list[str]:
             i = int(np.argmax(gaps > MAX_GAP_BDAYS))
             issues.append(f"gap > {MAX_GAP_BDAYS} business days: {days[i]} -> {days[i + 1]} (warning)")
     return issues
+
+
+def hard_issues(df: pd.DataFrame) -> list[str]:
+    """Issues from check_daily excluding warnings (entries marked "(warning)")."""
+    return [i for i in check_daily(df) if not i.endswith("(warning)")]

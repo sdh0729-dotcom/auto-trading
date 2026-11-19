@@ -5,7 +5,7 @@ import pytest
 
 from autotrade.data import delisted_kr
 from autotrade.data.delisted_kr import fetch_delisted_daily, supplement_delisted_kr
-from autotrade.data.store import load_daily, save_meta
+from autotrade.data.store import load_daily, save_daily, save_meta
 
 
 @pytest.fixture(autouse=True)
@@ -75,3 +75,33 @@ def test_only_delisted_saved_and_bad_data_failed(monkeypatch, tmp_data):
     assert load_daily("kr", "111111")["source"].eq("pykrx").all()
     assert load_daily("kr", "222222") is None
     assert load_daily("kr", "333333") is None
+
+
+def test_suspension_gap_is_warning_not_failure(monkeypatch, tmp_data):
+    save_kr_meta({"111111": True})
+    df = pd.concat([korean_cols_df(5), korean_cols_df(5)])
+    df.index = pd.DatetimeIndex(list(pd.bdate_range("2018-01-02", periods=5))
+                                + list(pd.bdate_range("2018-02-12", periods=5)), name="날짜")
+    monkeypatch.setattr(delisted_kr, "_pykrx_ohlcv", lambda *a, **k: df)
+    rep = supplement_delisted_kr(date(2018, 1, 1))
+    assert rep.fetched == 1 and rep.failed == []
+    assert len(load_daily("kr", "111111")) == 10
+
+
+def test_zero_price_suspension_rows_dropped(monkeypatch):
+    raw = korean_cols_df(5)
+    raw.iloc[1:3, raw.columns.get_indexer(["시가", "고가", "저가", "거래량"])] = 0
+    monkeypatch.setattr(delisted_kr, "_pykrx_ohlcv", lambda *a, **k: raw)
+    df = fetch_delisted_daily("000000", date(2018, 1, 1), date(2018, 12, 31))
+    assert len(df) == 3 and (df[["open", "high", "low", "close"]] > 0).all().all()
+
+
+def test_existing_other_source_skipped_and_untouched(monkeypatch, tmp_data):
+    from tests.test_data import good_df
+    save_kr_meta({"111111": True})
+    save_daily("kr", "111111", good_df())  # source defaults to toss
+    called = []
+    monkeypatch.setattr(delisted_kr, "_pykrx_ohlcv", lambda *a, **k: called.append(1))
+    rep = supplement_delisted_kr(date(2018, 1, 1))
+    assert rep.skipped == ["111111"] and rep.fetched == 0 and not called
+    assert load_daily("kr", "111111")["source"].eq("toss").all()

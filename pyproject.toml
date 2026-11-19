@@ -32,6 +32,9 @@ packages = ["src/autotrade"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: timing/size checks (run by default; deselect with -m 'not slow')",
+]
 filterwarnings = [
     "ignore:pkg_resources is deprecated as an API:UserWarning",
     "ignore:pkg_resources is deprecated as an API:DeprecationWarning",

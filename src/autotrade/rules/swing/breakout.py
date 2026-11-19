@@ -24,7 +24,7 @@ class Breakout(BaseRule):
         n, m, k = (self.params[x] for x in self.PARAM_KEYS)
         prev_high = rolling_high(panel.high, n).shift(1)
         entries = panel.close > prev_high
-        exits = panel.close < rolling_low(panel.low, m)
+        exits = panel.close < rolling_low(panel.low, m).shift(1)
         conf = (panel.close - prev_high) / atr(panel, 14)
         return finalize(panel, entries, exits, atr_stop(panel, k), conf,
                         "next_open", "next_open", MAX_HOLD)

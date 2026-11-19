@@ -111,3 +111,17 @@ def test_tom_calendar_offsets():
     first_pos = [int(months.reset_index(drop=True)[months.reset_index(drop=True) == m].index[0])
                  for m in months.unique()]
     assert ex_pos == [fp + 2 for fp in first_pos[1:]]
+
+
+def test_breakout_exit_fires_on_break_below_prior_m_day_low():
+    p = make_panel(100, ["A"], seed=1)
+    for df in (p.open, p.high, p.low, p.close):
+        df["A"] = 100.0
+    p.low.iloc[:, 0] = 99.0
+    p.low.iloc[40, 0] = 90.0       # low 40 bars ago: inside m=20 window at t=50? 50-20=30..49 -> yes
+    p.close.iloc[50, 0] = 95.0     # below prior 5-day low (99) ; above 90
+    p.low.iloc[50, 0] = 94.0       # realistic bar: low <= close
+    s5 = SWING_FAMILIES["breakout"]({"n": 20, "m": 5, "k": 2}).signals(p)
+    s20 = SWING_FAMILIES["breakout"]({"n": 20, "m": 20, "k": 2}).signals(p)
+    assert s5.exits["A"].tolist() == [i == 50 for i in range(100)]
+    assert not s20.exits["A"].any()   # prior 20-day low is 90 -> 95 is not below it

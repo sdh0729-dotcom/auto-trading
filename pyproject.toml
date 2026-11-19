@@ -14,6 +14,7 @@ dependencies = [
     "nautilus_trader==1.231.*",
     "pykrx",
     "python-dotenv",
+    "setuptools<81",  # pykrx imports pkg_resources
 ]
 
 [dependency-groups]

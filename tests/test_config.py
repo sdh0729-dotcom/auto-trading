@@ -104,8 +104,9 @@ def test_cli_loads_dotenv_before_computing_paths(tmp_path, monkeypatch):
     env = tmp_path / ".env"
     env.write_text(f"AUTOTRADE_RESEARCH={tmp_path / 'from-dotenv'}\n")
     monkeypatch.setenv("AUTOTRADE_DOTENV", str(env))
-    monkeypatch.setenv("AUTOTRADE_RESEARCH", "x")
-    monkeypatch.delenv("AUTOTRADE_RESEARCH")            # unset now, removed again at teardown
+    monkeypatch.delenv("AUTOTRADE_RESEARCH")            # unset now, restored at teardown
+    from autotrade import pipeline                      # without .env: tmp, never the repo
+    monkeypatch.setattr(pipeline, "repo_root", lambda: tmp_path / "fallback")
     r = CliRunner().invoke(app, ["journal", "메모"])
     assert r.exit_code == 0, r.output
     assert list((tmp_path / "from-dotenv" / "journal").glob("*.md"))

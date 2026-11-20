@@ -28,7 +28,7 @@ from autotrade.costs import CostModel
 from autotrade.data.collect import collect_daily, collect_meta
 from autotrade.data.delisted_kr import supplement_delisted_kr
 from autotrade.data.quality import check_daily, hard_issues
-from autotrade.data.store import data_root, load_daily, load_panel, trading_dates
+from autotrade.data.store import calendar, data_root, load_daily, load_panel, trading_dates
 from autotrade.report import (CONFIDENCE_FORMULAS, RuleCard, limitations, write_leaderboard,
                               write_rule_card)
 from autotrade.rules.registry import SWING_FAMILIES
@@ -266,6 +266,8 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
             summary["warnings"] += 1
         else:
             summary["clean"] += 1
+    _, dropped = calendar(market)
+    summary["calendar_dropped"] = [d.date().isoformat() for d in dropped]
     if supplement is not None:
         summary["delisted_fetched"] = supplement.fetched
         summary["delisted_empty"] = len(supplement.empty)

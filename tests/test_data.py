@@ -7,7 +7,8 @@ import pytest
 
 from autotrade.data.collect import collect_daily, collect_meta
 from autotrade.data.quality import check_daily, clean_daily, hard_issues
-from autotrade.data.store import load_daily, load_meta, load_panel, save_daily
+from autotrade.data.store import (calendar, load_daily, load_meta, load_panel, save_daily,
+                                  save_meta, trading_dates)
 from autotrade.toss.client import CandlePage, TossApiError
 from tests.fixtures import make_panel
 
@@ -287,3 +288,47 @@ def test_make_panel_properties_and_overrides():
     assert p.meta.loc["A", "source"] == "synthetic" and not p.meta.loc["A", "delisted"]
     q = make_panel(50, ["A", "B"], seed=1)
     assert p.close.equals(q.close)
+
+
+def _store_panel(p):
+    for sym in p.close.columns:
+        df = pd.DataFrame({k: getattr(p, k)[sym] for k in ("open", "high", "low", "close",
+                                                             "volume")}).dropna()
+        save_daily("kr", sym, df)
+    save_meta("kr", p.meta)
+
+
+def test_stray_date_is_not_a_trading_day(tmp_data):
+    """Reviewer probe: one symbol's bar on a Saturday made the union calendar NaN for all
+    others, emptying the universe for 20 days."""
+    from dataclasses import replace
+    from autotrade.config import load_lab, load_market_raw, load_pocket
+    from autotrade.universe.build import eligible_mask
+    q = make_panel(300, ["A", "B", "C"], seed=2)
+    extra = pd.Timestamp("2016-06-04")                        # a Saturday
+    for name in ("open", "high", "low", "close", "volume"):
+        df = getattr(q, name).copy()
+        df.loc[extra] = np.nan
+        df.loc[extra, "C"] = 1e6 if name == "volume" else 100.0
+        setattr(q, name, df.sort_index())
+    _store_panel(q)
+    kept, dropped = calendar("kr")
+    assert list(dropped) == [extra] and extra not in kept
+    s, e = date(2016, 1, 1), date(2017, 12, 31)
+    assert extra not in trading_dates("kr", s, e)
+    panel = load_panel("kr", None, s, e)
+    assert extra not in panel.close.index
+    assert panel.close.index.equals(trading_dates("kr", s, e))
+    mc = replace(load_market_raw("us"), always_include=[])
+    lab = replace(load_lab(), universe_top_n=3)
+    m = eligible_mask(panel, mc, load_pocket("swing"), lab, "paper", 1300.0)
+    pos = panel.close.index.searchsorted(extra)
+    assert m[["A", "B"]].iloc[pos - 1:pos + 25].all().all()   # no 20-day hole
+
+
+def test_calendar_keeps_dates_with_half_of_active_symbols(tmp_data):
+    a, b = good_df(6), good_df(6).drop(good_df(6).index[2])
+    save_daily("kr", "A", a)
+    save_daily("kr", "B", b)                                   # B misses day 2: 1 of 2 = 50%
+    kept, dropped = calendar("kr")
+    assert list(kept) == list(a.index) and dropped.empty

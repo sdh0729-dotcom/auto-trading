@@ -5,12 +5,15 @@ import tempfile
 from datetime import date
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from autotrade.types import META_COLUMNS, Market, Panel
 
 PRICE_COLUMNS = ["open", "high", "low", "close", "volume"]
 DAILY_COLUMNS = PRICE_COLUMNS + ["source"]
+CALENDAR_WINDOW_DAYS = 10     # a symbol counts as active on d if it has a bar within +-10 days
+CALENDAR_MIN_SHARE = 0.5      # d is a trading day if >= 50% of the active symbols have a bar
 
 
 def data_root() -> Path:
@@ -74,19 +77,43 @@ def _stored_symbols(market: Market) -> list[str]:
     return sorted(p.stem for p in d.glob("*.parquet")) if d.exists() else []
 
 
-def trading_dates(market: Market, start: date, end: date) -> pd.DatetimeIndex:
-    """Union of stored daily dates in [start, end] (the index `load_panel` would build),
-    read without loading any price column."""
-    s, e = pd.Timestamp(start), pd.Timestamp(end)
-    dates: set = set()
+def calendar(market: Market) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
+    """(trading dates, dropped dates) over all stored daily files, read without any price.
+
+    A stored date is a trading day when at least CALENDAR_MIN_SHARE of the symbols that have
+    any bar within +-CALENDAR_WINDOW_DAYS calendar days have a bar on it; other dates (a
+    stray bar on a holiday/weekend) are dropped so they cannot punch NaN holes into every
+    other symbol's rolling statistics. Uses only which dates exist, never prices."""
+    per_symbol = []
     for sym in _stored_symbols(market):
         idx = pd.read_parquet(_daily_dir(market) / f"{sym}.parquet", columns=["source"]).index
-        dates.update(idx[(idx >= s) & (idx <= e)])
-    return pd.DatetimeIndex(sorted(dates), name="date")
+        per_symbol.append(np.unique(idx.values.astype("datetime64[D]")))
+    empty = pd.DatetimeIndex([], name="date")
+    if not per_symbol:
+        return empty, empty
+    union = np.unique(np.concatenate(per_symbol))
+    w = np.timedelta64(CALENDAR_WINDOW_DAYS, "D")
+    active = np.zeros(len(union))
+    present = np.zeros(len(union))
+    for d in per_symbol:
+        active += np.searchsorted(d, union + w, "right") > np.searchsorted(d, union - w, "left")
+        present += np.isin(union, d, assume_unique=True)
+    keep = present >= CALENDAR_MIN_SHARE * active
+
+    def ix(a):
+        return pd.DatetimeIndex(a.astype("datetime64[ns]"), name="date")
+    return ix(union[keep]), ix(union[~keep])
+
+
+def trading_dates(market: Market, start: date, end: date) -> pd.DatetimeIndex:
+    """Trading days (see `calendar`) in [start, end]: the index `load_panel` builds."""
+    kept, _ = calendar(market)
+    return kept[(kept >= pd.Timestamp(start)) & (kept <= pd.Timestamp(end))]
 
 
 def load_panel(market: Market, symbols: list[str] | None, start: date, end: date) -> Panel:
-    """Wide OHLCV panel over [start, end] (inclusive). Days a symbol lacks are NaN."""
+    """Wide OHLCV panel over [start, end] (inclusive) on the market's trading calendar
+    (dates dropped by `calendar` are left out). Days a symbol lacks are NaN."""
     syms = symbols if symbols is not None else _stored_symbols(market)
     s, e = pd.Timestamp(start), pd.Timestamp(end)
     frames: dict[str, pd.DataFrame] = {}
@@ -96,8 +123,11 @@ def load_panel(market: Market, symbols: list[str] | None, start: date, end: date
             continue
         frames[sym] = df.loc[(df.index >= s) & (df.index <= e)]
     cols = list(frames)
-    index = pd.DatetimeIndex(sorted(set().union(*(f.index for f in frames.values()))),
-                             name="date") if frames else pd.DatetimeIndex([], name="date")
+    index = pd.DatetimeIndex([], name="date")
+    if frames:
+        have = pd.DatetimeIndex(sorted(set().union(*(f.index for f in frames.values()))))
+        index = trading_dates(market, start, end)
+        index = index[index.isin(have)]
 
     def wide(col: str) -> pd.DataFrame:
         return pd.DataFrame({c: frames[c][col] for c in cols}, index=index, columns=cols,

@@ -305,6 +305,23 @@ def test_collect_wiring_limit_and_quality_summary(cli_env, monkeypatch):
     assert "clean 1" in r.output and "issues 1" in r.output and "missing 1" in r.output
 
 
+def test_collect_reports_dropped_calendar_dates(cli_env, monkeypatch):
+    meta = pd.DataFrame({"name": ["X"], "delisted": [False]},
+                        index=pd.Index(["000010"], name="symbol"))
+    monkeypatch.setattr(pipeline, "make_client_from_env", lambda path: object())
+    monkeypatch.setattr(pipeline, "collect_meta", lambda client, market: meta)
+
+    def fake_daily(client, market, symbol, start):
+        df = pd.DataFrame({"open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0,
+                           "volume": 1.0}, index=pd.to_datetime(["2016-03-05"]))  # Saturday
+        store.save_daily(market, symbol, df)
+        return 1
+    monkeypatch.setattr(pipeline, "collect_daily", fake_daily)
+    monkeypatch.setattr(pipeline, "supplement_delisted_kr", lambda start, symbols=None: None)
+    r = run(["collect", "--market", "kr", "--since", "2016-01-01"])
+    assert "calendar dropped 1 (2016-03-05)" in r.output
+
+
 def test_verify_scenarios_wiring_us(cli_env, monkeypatch):
     """US: paper 5,000,000 KRW non-fractional, real 50,000 KRW fractional, both converted
     with 1/usd_krw; Nautilus and run_portfolio get the same inputs and the rule's timing."""

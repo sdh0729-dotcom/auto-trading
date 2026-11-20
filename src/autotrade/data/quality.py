@@ -6,9 +6,23 @@ import pandas as pd
 MAX_GAP_BDAYS = 10
 
 
+PRICE = ["open", "high", "low", "close"]
+
+
+def clean_daily(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop suspension rows (volume 0 and any OHLC <= 0: O/H/L=0 with the previous close, as
+    Toss and pykrx return them for non-trading days). Shared by every daily source."""
+    suspended = (df["volume"] == 0) & (df[PRICE] <= 0).any(axis=1)
+    return df[~suspended]
+
+
 def check_daily(df: pd.DataFrame) -> list[str]:
     """Return problem descriptions for a daily frame (index=date). Empty list means clean."""
     issues: list[str] = []
+    nan = df[PRICE + ["volume"]].isna()
+    if nan.to_numpy().any():
+        first = df.index[nan.any(axis=1).to_numpy()][0]
+        issues.append(f"NaN cells: {int(nan.to_numpy().sum())}, first {pd.Timestamp(first).date()}")
     if df.index.duplicated().any():
         issues.append(f"duplicate index: {int(df.index.duplicated().sum())} rows")
     o, h, l, c = df["open"], df["high"], df["low"], df["close"]

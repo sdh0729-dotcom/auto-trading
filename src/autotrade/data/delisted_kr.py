@@ -12,7 +12,7 @@ from datetime import date
 
 import pandas as pd
 
-from autotrade.data.quality import hard_issues
+from autotrade.data.quality import clean_daily, hard_issues
 from autotrade.data.store import load_daily, load_meta, save_daily
 
 PYKRX_COLUMNS = {"시가": "open", "고가": "high", "저가": "low", "종가": "close", "거래량": "volume"}
@@ -38,9 +38,7 @@ def fetch_delisted_daily(symbol: str, start: date, end: date) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "source"])
     df = raw.rename(columns=PYKRX_COLUMNS)[list(PYKRX_COLUMNS.values())].copy()
-    # Suspension days come back as O/H/L=0, close=previous close, volume=0: not real bars.
-    suspended = (df["volume"] == 0) & (df[["open", "high", "low", "close"]] <= 0).any(axis=1)
-    df = df[~suspended]
+    df = clean_daily(df)            # suspension days (O/H/L=0, volume=0) are not real bars
     df.index = pd.DatetimeIndex(pd.to_datetime(df.index)).tz_localize(None).normalize()
     df.index.name = "date"
     df["source"] = "pykrx"

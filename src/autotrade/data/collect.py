@@ -6,6 +6,7 @@ from datetime import date, datetime
 import numpy as np
 import pandas as pd
 
+from autotrade.data.quality import clean_daily
 from autotrade.data.store import PRICE_COLUMNS, load_daily, save_daily, save_meta
 from autotrade.toss.client import TossApiError, TossClient
 from autotrade.types import Market
@@ -78,8 +79,9 @@ def _fetch(client: TossClient, market: Market, symbol: str, stop_at: pd.Timestam
         before = page.next_before
     if not pages:
         return None, complete
-    new = pd.concat(pages)
-    return new[~new.index.duplicated(keep="first")].sort_index(), complete
+    new = clean_daily(pd.concat(pages))
+    new = new[~new.index.duplicated(keep="first")].sort_index()
+    return (new if len(new) else None), complete
 
 
 def _local_midnight(day: pd.Timestamp, market: Market) -> datetime:

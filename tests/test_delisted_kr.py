@@ -105,3 +105,15 @@ def test_existing_other_source_skipped_and_untouched(monkeypatch, tmp_data):
     rep = supplement_delisted_kr(date(2018, 1, 1))
     assert rep.skipped == ["111111"] and rep.fetched == 0 and not called
     assert load_daily("kr", "111111")["source"].eq("toss").all()
+
+
+def test_pykrx_uses_shared_clean_daily(monkeypatch):
+    seen = []
+
+    def spy(df):
+        seen.append(len(df))
+        return df
+    monkeypatch.setattr(delisted_kr, "clean_daily", spy)
+    monkeypatch.setattr(delisted_kr, "_pykrx_ohlcv", lambda *a, **k: korean_cols_df(5))
+    fetch_delisted_daily("000000", date(2018, 1, 1), date(2018, 12, 31))
+    assert seen == [5]

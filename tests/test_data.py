@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from autotrade.data.collect import collect_daily, collect_meta
-from autotrade.data.quality import check_daily
+from autotrade.data.quality import check_daily, clean_daily, hard_issues
 from autotrade.data.store import load_daily, load_meta, load_panel, save_daily
 from autotrade.toss.client import CandlePage, TossApiError
 from tests.fixtures import make_panel
@@ -203,6 +203,38 @@ def test_quality_flags():
     bad.loc[bad.index[3], "high"] = bad["low"].iloc[3] - 1
     assert any("ohlc" in s for s in check_daily(bad))
     assert check_daily(good_df()) == []
+
+
+def test_clean_daily_drops_suspension_rows_only():
+    d = good_df(5)
+    d.loc[d.index[1], ["open", "high", "low", "volume"]] = 0.0      # suspension: O/H/L 0, vol 0
+    d.loc[d.index[3], "volume"] = 0.0                               # no trades, real prices
+    out = clean_daily(d)
+    assert list(out.index) == [d.index[i] for i in (0, 2, 3, 4)]
+    assert hard_issues(out) == []
+
+
+def test_nan_cells_are_a_hard_issue():
+    d = good_df(5)
+    d.loc[d.index[2], "close"] = np.nan
+    issues = hard_issues(d)
+    assert any("NaN" in i for i in issues)
+
+
+def test_toss_suspension_rows_are_not_stored(tmp_data):
+    c = FakeClient(first="2026-03-23", last="2026-03-27")
+    real_bar = c._bar
+
+    def bar(d, i):
+        b = real_bar(d, i)
+        if d == "2026-03-25":
+            b.update(open=0.0, high=0.0, low=0.0, volume=0.0)
+        return b
+    c._bar = bar
+    collect_daily(c, "kr", "X", start=date(2026, 1, 1))
+    df = load_daily("kr", "X")
+    assert pd.Timestamp("2026-03-25") not in df.index and len(df) == 4
+    assert hard_issues(df) == []
 
 
 def test_quality_other_problems():

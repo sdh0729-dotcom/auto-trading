@@ -47,9 +47,11 @@ def fetch_delisted_daily(symbol: str, start: date, end: date) -> pd.DataFrame:
     return df
 
 
-def supplement_delisted_kr(start: date) -> SupplementReport:
+def supplement_delisted_kr(start: date, symbols: list[str] | None = None) -> SupplementReport:
+    """Supplement every delisted symbol in the KR meta, or only those of `symbols`."""
     meta = load_meta("kr")
-    symbols = [str(s) for s in meta.index[meta["delisted"].astype(bool)]]
+    delisted = [str(s) for s in meta.index[meta["delisted"].astype(bool)]]
+    symbols = delisted if symbols is None else [s for s in delisted if s in set(symbols)]
     end = date.today()
     report = SupplementReport()
     for i, sym in enumerate(symbols):

@@ -60,6 +60,17 @@ def _stored_symbols(market: Market) -> list[str]:
     return sorted(p.stem for p in d.glob("*.parquet")) if d.exists() else []
 
 
+def trading_dates(market: Market, start: date, end: date) -> pd.DatetimeIndex:
+    """Union of stored daily dates in [start, end] (the index `load_panel` would build),
+    read without loading any price column."""
+    s, e = pd.Timestamp(start), pd.Timestamp(end)
+    dates: set = set()
+    for sym in _stored_symbols(market):
+        idx = pd.read_parquet(_daily_dir(market) / f"{sym}.parquet", columns=["source"]).index
+        dates.update(idx[(idx >= s) & (idx <= e)])
+    return pd.DatetimeIndex(sorted(dates), name="date")
+
+
 def load_panel(market: Market, symbols: list[str] | None, start: date, end: date) -> Panel:
     """Wide OHLCV panel over [start, end] (inclusive). Days a symbol lacks are NaN."""
     syms = symbols if symbols is not None else _stored_symbols(market)

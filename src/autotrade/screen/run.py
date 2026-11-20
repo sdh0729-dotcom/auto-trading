@@ -14,6 +14,9 @@ from autotrade.types import Panel
 from autotrade.validate.experiments import ExperimentLog
 from autotrade.validate.seal import SealViolation
 
+# `lab validate` takes only screened rules with at least this many train-period trades.
+MIN_TRAIN_TRADES = 30
+
 SCREEN_COLUMNS = ["rule_id", "params", "n_trades", "mean_net_r", "t_stat", "profit_factor",
                   "win_rate", "sum_net_return"]
 

@@ -13,8 +13,28 @@ M = [1, 2, 3, 5]   # exit: m-th trading day of next month
 K = [2.0, 3.0]
 
 
+def final_month_complete(panel: Panel) -> bool:
+    """Is the panel's last row its month's last trading day? Per `panel.calendar` when it
+    has a date after that row (the next trading date lies in a later month); otherwise only
+    a last row on the month's last calendar day proves it."""
+    idx = panel.close.index
+    if len(idx) == 0:
+        return False
+    last = idx[-1]
+    cal = panel.calendar
+    if cal is not None:
+        later = cal[cal > last]
+        if len(later):
+            return later[0].to_period("M") != last.to_period("M")
+    return (last + pd.Timedelta(days=1)).month != last.month
+
+
 class Tom(BaseRule):
     """Turn-of-month. Month boundaries come from the panel's own index (calendar only, no prices).
+
+    The panel's final month gets no entry unless its last row is that month's last trading
+    day (`final_month_complete`): a panel ending mid-month must not treat its last row as a
+    month end (that would be an entry the longer history does not have).
 
     max_hold_days = n + m (<= 20 for the grid).
     """
@@ -33,7 +53,10 @@ class Tom(BaseRule):
         ends = np.r_[starts[1:] - 1, len(months) - 1]
         e_pos = np.zeros(len(c), bool)
         x_pos = np.zeros(len(c), bool)
-        for last in ends:
+        complete = final_month_complete(panel)
+        for j, last in enumerate(ends):
+            if j == len(ends) - 1 and not complete:
+                continue          # month end unknown: n days before it is not knowable yet
             if last - n >= 0:
                 e_pos[last - n] = True
         for i, first in enumerate(starts):

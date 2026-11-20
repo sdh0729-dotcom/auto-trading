@@ -3,18 +3,22 @@
 
 Periods: on the first `screen` of a pocket x market the stored trading dates from
 `lab.swing_start` on are split by `lab.split` into train / valid / sealed and persisted in
-research/periods-{pocket}-{market}.json (with the data cutoff); every later command reads that
+research/periods-{pocket}-{market}.json (with the data cutoff) once the screen's checks
+passed; a lost file is rebuilt from the seal tickets, not re-split. Every later command reads that
 file, so later collects never move a boundary (`lab periods --new-cycle` starts a
 re-validation cycle, spec 7.9). `screen` loads prices only through the train end, `validate`
 only through the valid end, and both refuse ranges overlapping an already-opened sealed
-period; the sealed prices are loaded by `verify_final` after it has opened the seal ticket. Signals are always computed on the panel history through the end of the
-period being evaluated (warm-up), while simulate / run_portfolio / run_nautilus are limited
-to the period itself.
+period; the sealed prices are loaded by `verify_final` after it has opened the seal ticket.
+Signals are always computed on the panel history from `lab.history_start` (swing_start -
+warmup_days) through the end of the period being evaluated (warm-up), while the universe
+statistics start at swing_start (no symbol is eligible before it) and simulate /
+run_portfolio / run_nautilus are limited to the period itself.
 """
 from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -29,7 +33,7 @@ from autotrade.config import (ConfigError, LabConfig, MarketConfig, PocketConfig
                               load_pocket, load_synced, repo_root)
 from autotrade.costs import CostModel
 from autotrade.data.collect import collect_daily, collect_meta
-from autotrade.data.delisted_kr import supplement_delisted_kr
+from autotrade.data.delisted_kr import save_supplement_record, supplement_delisted_kr
 from autotrade.data.quality import check_daily, hard_issues
 from autotrade.data.store import (calendar, data_root, load_daily, load_panel, stored_symbols,
                                   trading_dates)
@@ -147,9 +151,69 @@ def _load_periods(pocket: str, market: str) -> PeriodRecord | None:
         raise LabError(str(e)) from e
 
 
+def _validate_runs_logged(pocket: str, market: str, valid: tuple[date, date]) -> int:
+    """Highest `validate_run` the experiment log holds for the valid period (0 if none)."""
+    rows = ExperimentLog(experiments_path()).rows(pocket, market)
+    want = list(_iso(valid))
+    runs = [int(m.get("validate_run", 0) or 0) for st, p, m in
+            zip(rows["stage"], rows["period"], rows["metrics"])
+            if st == "validate" and list(p) == want and isinstance(m, dict)]
+    return max(runs, default=0)
+
+
+def _logged_period(rows: pd.DataFrame, stage: str) -> list[str] | None:
+    """Period [start, end] of the latest `stage` row in the experiment log, or None."""
+    rows = rows[rows["stage"] == stage]
+    return [str(x) for x in rows.iloc[-1]["period"]] if len(rows) else None
+
+
+def _logged_cycles(rows: pd.DataFrame) -> dict[int, tuple[str, str, str]]:
+    """{cycle: (sealed start, sealed end, data cutoff)} of the latest "cycle_started" row
+    per cycle (written by `lab periods --new-cycle`)."""
+    out = {}
+    started = rows[rows["stage"] == "cycle_started"]
+    for p, m in zip(started["period"], started["metrics"]):
+        if isinstance(m, dict) and "cycle" in m:
+            out[int(m["cycle"])] = (str(p[0]), str(p[1]), str(m.get("data_cutoff", "")))
+    return out
+
+
+def _new_periods(pocket: str, market: str, lab: LabConfig) -> PeriodRecord:
+    """The period record for a missing file: rebuilt from the seal tickets when some exist
+    (a fresh split could move over an opened seal), else split from the stored dates. A
+    rebuilt train / valid must equal the periods of the latest logged screen / validate."""
+    tickets = SealRegistry(seal_path()).tickets(pocket, market)
+    cal = trading_dates(market, lab.swing_start, date.today())
+    if len(cal) == 0:
+        raise LabError(f"no daily data for {market}: run `lab collect --market {market}` first")
+    if tickets:
+        rows = ExperimentLog(experiments_path()).rows(pocket, market)
+        logged = {st: _logged_period(rows, st) for st in ("screen", "validate")}
+        try:
+            rec = period_store.rebuild_record(pocket, market, tickets, cal, lab.split,
+                                              train=logged["screen"],
+                                              valid=logged["validate"],
+                                              started=_logged_cycles(rows))
+            missing = [st for st, p in logged.items() if p is None]
+            if missing:
+                raise PeriodError(f"no logged {' / '.join(missing)} period to check the "
+                                  "rebuilt train / valid against")
+        except PeriodError as e:
+            raise LabError(f"{periods_path(pocket, market)} is missing and the seal tickets "
+                           f"of {pocket}/{market} cannot rebuild it ({e}): restore the periods "
+                           "file") from e
+        return replace(rec, validate_runs=_validate_runs_logged(pocket, market,
+                                                                rec.periods.valid))
+    try:
+        return period_store.new_record(pocket, market, cal, lab.split)
+    except ValueError as e:
+        raise LabError(f"not enough daily data for {market} to split periods: {e}") from e
+
+
 def _setup(pocket: str, market: str, create: bool = False) -> Setup:
     """Configs + the persisted period split (no prices are read). Only `create` (the first
-    `screen`) may split the stored trading dates and write the period file."""
+    `screen`) may make the period record (see `_new_periods`); it is written only after the
+    screen's checks passed on it."""
     _check_market(market)
     _families(pocket)
     _refuse_limited(market)
@@ -158,14 +222,8 @@ def _setup(pocket: str, market: str, create: bool = False) -> Setup:
     if rec is None:
         if not create:
             raise LabError(f"no periods for {pocket}/{market}: run `lab screen` first")
-        cal = trading_dates(market, lab.swing_start, date.today())
-        if len(cal) == 0:
-            raise LabError(f"no daily data for {market}: run `lab collect --market {market}` "
-                           "first")
-        try:
-            rec = period_store.new_record(pocket, market, cal, lab.split)
-        except ValueError as e:
-            raise LabError(f"not enough daily data for {market} to split periods: {e}") from e
+        rec = _new_periods(pocket, market, lab)
+        _refuse_opened_overlap(pocket, market, *rec.periods.train, "screen")
         period_store.save_record(periods_path(pocket, market), rec)
     cal = trading_dates(market, lab.swing_start, rec.data_cutoff)
     if len(cal) == 0:
@@ -186,10 +244,26 @@ def _refuse_opened_overlap(pocket: str, market: str, start: date, end: date,
 
 
 def _panel(s: Setup, end: date) -> Panel:
-    p = load_panel(s.market.market, None, s.lab.swing_start, end)
-    if not p.close.index.equals(s.calendar[s.calendar <= pd.Timestamp(end)]):
+    """Prices from lab.history_start (signal warm-up before swing_start) through `end`; its
+    `calendar` (trading dates only) is cut at the period record's data cutoff, so dates
+    collected later never change what a screen / validate / verify run computes."""
+    p = load_panel(s.market.market, None, s.lab.history_start, end)
+    idx = p.close.index
+    if not idx[idx >= pd.Timestamp(s.lab.swing_start)].equals(
+            s.calendar[s.calendar <= pd.Timestamp(end)]):
         raise LabError("stored data changed while running; re-run the command")
+    if p.calendar is not None:
+        p = replace(p, calendar=p.calendar[p.calendar <= pd.Timestamp(s.record.data_cutoff)])
     return p
+
+
+def _eligible(s: Setup, panel: Panel, scenario: str) -> pd.DataFrame:
+    """Universe mask on the panel's index: statistics over [swing_start, ...] only, so the
+    warm-up rows (before swing_start) are never eligible and feed no universe window."""
+    idx = panel.close.index
+    lab_panel = panel.slice(s.lab.swing_start, idx.max()) if len(idx) else panel
+    mask = eligible_mask(lab_panel, s.market, s.pocket, s.lab, scenario, s.synced.usd_krw)
+    return mask.reindex(index=idx, columns=panel.close.columns, fill_value=False).astype(bool)
 
 
 def _cost_model(market: MarketConfig, meta: pd.DataFrame) -> CostModel:
@@ -307,13 +381,37 @@ def sync(kr_commission: float | None = None, us_commission: float | None = None,
 
 
 # ---------------------------------------------------------------- collect
+# failures that hit every symbol alike: abort the whole collect instead of retrying ~2.5k
+SYSTEMIC_STATUS = {401: "credentials rejected (401 after one re-auth): check TOSS_CLIENT_ID "
+                        "/ TOSS_CLIENT_SECRET",
+                   403: "access forbidden (403): check the API key's permissions / IP "
+                        "allowlist"}
+MAX_CONSECUTIVE_FAILURES = 20
+
+
+def _collect_failed(market: str, sym: str, e: Exception, failed: list[str],
+                    streak: int) -> int:
+    """Record one symbol's failure; abort after MAX_CONSECUTIVE_FAILURES in a row (offline,
+    API down). Returns the new streak."""
+    log.warning("collect %s %s failed: %s: %s", market, sym, type(e).__name__, e)
+    failed.append(f"{sym}: {type(e).__name__}: {e}")
+    streak += 1
+    if streak >= MAX_CONSECUTIVE_FAILURES:    # error type (+ API code) only: one line, and
+        code = f" code={e.code}" if isinstance(e, TossApiError) else ""   # no message text
+        raise LabError(f"collect aborted after {streak} consecutive symbol failures (last "
+                       f"{sym}: {type(e).__name__}{code})") from e
+    return streak
+
+
 def collect(market: str, since: date | None = None, limit: int | None = None) -> dict:
-    """Meta -> incremental daily bars (Toss) -> (KR) pykrx delisted supplement -> quality
-    summary. `limit` keeps the first N symbols, always_include first, and marks the data
-    as partial (screen / validate / verify --final refuse it) until a full collect."""
+    """Meta -> incremental daily bars (Toss) from `since` (default lab.history_start) ->
+    (KR) pykrx delisted supplement (its counts saved to data/<market>/supplement.json for the
+    reports) -> quality summary. `limit` keeps the first N symbols, always_include first, and
+    marks the data as partial (screen / validate / verify --final refuse it) until a full
+    collect. A Toss 401/403 or MAX_CONSECUTIVE_FAILURES failing symbols in a row abort it."""
     _check_market(market)
     mc = load_market_raw(market)
-    start = since or load_lab().swing_start
+    start = since or load_lab().history_start      # swing_start - warmup_days
     client = _client()
     try:
         meta = collect_meta(client, market)
@@ -325,13 +423,18 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
         delisted = set(str(s) for s in meta.index[meta["delisted"].astype(bool)])
         via_pykrx = [s for s in ordered if s in delisted] if mc.delisted_supplement else []
         via_toss = [s for s in ordered if s not in set(via_pykrx)]
-        added, failed = 0, []
+        added, failed, streak = 0, [], 0
         for sym in via_toss:            # one failing symbol is reported, the run continues
             try:
                 added += collect_daily(client, market, sym, start)
+                streak = 0
+            except TossApiError as e:
+                if e.status in SYSTEMIC_STATUS:     # the client already re-authed once on 401
+                    raise LabError(f"collect aborted at {sym}: {SYSTEMIC_STATUS[e.status]} "
+                                   f"(Toss API status={e.status} code={e.code})") from e
+                streak = _collect_failed(market, sym, e, failed, streak)
             except Exception as e:      # noqa: BLE001 - messages carry no secrets
-                log.warning("collect %s %s failed: %s: %s", market, sym, type(e).__name__, e)
-                failed.append(f"{sym}: {type(e).__name__}: {e}")
+                streak = _collect_failed(market, sym, e, failed, streak)
     except TossApiError as e:
         raise LabError(f"collect failed: {e}") from e
     except httpx.HTTPError as e:
@@ -339,6 +442,8 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
     supplement = None
     if via_pykrx:
         supplement = supplement_delisted_kr(start, symbols=via_pykrx)
+        if supplement is not None:      # what reports state, instead of the config flag
+            save_supplement_record(supplement, start, len(via_pykrx), market)
     marker = limited_marker(market)
     if limit is not None:
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -392,16 +497,17 @@ def universe(market: str, pocket: str, scenario: str, day: date) -> list[str]:
 def screen(pocket: str, market: str, family: str = "all") -> pd.DataFrame:
     """Every grid point of the chosen families on the train period (fixed amount, paper
     universe), logged as screen trials; sorted by mean_net_r."""
-    s = _setup(pocket, market, create=True)
+    _check_market(market)
     fams = _families(pocket)
     names = list(fams) if family == "all" else [family]
     for n in names:
         if n not in fams:
             raise LabError(f"unknown family {n!r} (choose from all, {', '.join(fams)})")
+    s = _setup(pocket, market, create=True)
     t0, t1 = s.periods.train
     _refuse_opened_overlap(pocket, market, t0, t1, "screen")
     panel = _panel(s, t1)
-    elig = eligible_mask(panel, s.market, s.pocket, s.lab, "paper", s.synced.usd_krw)
+    elig = _eligible(s, panel, "paper")
     cm = _cost_model(s.market, panel.meta)
     log = ExperimentLog(experiments_path())
     frames = []
@@ -472,7 +578,7 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     _refuse_opened_overlap(pocket, market, t0, v1, "validate")
     panel = _panel(s, v1)
     cal = panel.close.index
-    elig = eligible_mask(panel, s.market, s.pocket, s.lab, "paper", s.synced.usd_krw)
+    elig = _eligible(s, panel, "paper")
     cm = _cost_model(s.market, panel.meta)
     cpk = _currency_per_krw(s.market, s.synced)
     capital = s.lab.capital["paper"]
@@ -514,7 +620,8 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     period_store.save_record(periods_path(pocket, market), rec)
     for rid, m in metrics.items():
         m.update(pbo=pbo, pbo_candidates=len(metrics), in_top=rid in top_ids,
-                 recommended=rid in recommended, validate_run=rec.validate_runs)
+                 recommended=rid in recommended, recommended_ids=list(recommended),
+                 validate_run=rec.validate_runs)
         log.record(pocket, market, m["family"], rid, m["params"], "validate", _iso((v0, v1)),
                    {k: v for k, v in m.items() if k not in ("family", "params")})
     table = pd.DataFrame([{"rule_id": rid, **{k: metrics[rid][k] for k in (
@@ -575,6 +682,16 @@ def _sr_var_trials(log_rows: pd.DataFrame, valid_period: list[str]) -> float | N
     return float(np.var(srs, ddof=1)) if len(srs) >= 2 else None
 
 
+def _latest_recommended(log_rows: pd.DataFrame, valid_period: list[str]) -> list[str]:
+    """`recommended_ids` of the latest `lab validate` run on `valid_period` (its last logged
+    row; every row of a run carries the run's list); [] without one."""
+    val = log_rows[(log_rows["stage"] == "validate")
+                   & log_rows["period"].map(lambda p: list(p) == list(valid_period))]
+    if val.empty or not isinstance(val.iloc[-1]["metrics"], dict):
+        return []
+    return [str(r) for r in val.iloc[-1]["metrics"].get("recommended_ids") or []]
+
+
 def _parity_summary(rep: dict) -> dict:
     out = {k: v for k, v in rep.items() if k != "mismatches"}
     out["n_mismatches"] = len(rep["mismatches"])
@@ -597,7 +714,7 @@ def _final_scenarios(rule, panel: Panel, s: Setup, pbo: float, n_trials: int,
         capital = s.lab.capital[scen]
         cap0 = capital * cpk
         frac = s.market.fractional_orders if scen == "real" else False
-        elig = eligible_mask(panel, s.market, s.pocket, s.lab, scen, s.synced.usd_krw)
+        elig = _eligible(s, panel, scen)
         velig = elig.loc[elig.index <= pd.Timestamp(v1)]
         sig = rule.signals(panel, eligible=elig)             # history through sealed end
         vsig = rule.signals(vpanel, eligible=velig)          # history through valid end
@@ -634,7 +751,9 @@ def _final_scenarios(rule, panel: Panel, s: Setup, pbo: float, n_trials: int,
 
 def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path, Path]:
     """Open the seal for `rule_id` (once per pocket x market), then evaluate it on the sealed
-    period in NautilusTrader for both capital scenarios and write the rule card."""
+    period in NautilusTrader for both capital scenarios and write the rule card. Cycle 1 opens
+    only a rule recommended by the latest `lab validate` run on the current valid period;
+    later cycles only the previous cycle's final candidates."""
     s = _setup(pocket, market)
     fams = _families(pocket)
     log = ExperimentLog(experiments_path())
@@ -651,6 +770,14 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
                        f"{vrow['period'][0]}~{vrow['period'][1]} vs now "
                        f"{s.periods.valid[0]}~{s.periods.valid[1]}): re-run `lab screen` "
                        "and `lab validate`")
+    cycle = s.record.cycle
+    if cycle == 1:           # cycle >= 2: the previous cycle's finalists (SealRegistry.open)
+        latest = _latest_recommended(rows, list(_iso(s.periods.valid)))
+        if rule_id not in latest:
+            raise LabError(f"rule {rule_id} is not recommended by the latest `lab validate` "
+                           f"run on the valid period {s.periods.valid[0]}~"
+                           f"{s.periods.valid[1]} (recommended: "
+                           f"{', '.join(latest) or 'none'}): verify --final opens only those")
     family, params = scr.iloc[-1]["family"], scr.iloc[-1]["params"]
     rule = _rule(fams, family, params, rule_id)
     n_trials = log.n_trials(pocket, market)
@@ -658,7 +785,6 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
     sr_var = _sr_var_trials(rows, list(_iso(s.periods.valid)))
 
     registry = SealRegistry(seal_path(), s.lab.criteria.max_final_candidates)
-    cycle = s.record.cycle
     allowed = None
     if cycle > 1:            # spec 7.9: re-validate only the previous cycle's final candidates
         allowed = {t.rule_id for t in registry.tickets(pocket, market) if t.cycle == cycle - 1}
@@ -681,6 +807,7 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
                      for scen, d in scenarios.items()}
     final_metrics["verdict"] = verdict
     final_metrics["validate_runs"] = s.record.validate_runs
+    final_metrics["cycle"] = cycle
     final_metrics["parity_matched_share"] = {k: p["matched_share"] for k, p in parity.items()}
     log.record(pocket, market, family, rule_id, params, "final", _iso(s.periods.sealed),
                final_metrics)
@@ -691,7 +818,7 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
         metrics_by_stage={"screen": scr.iloc[-1]["metrics"], "validate": vrow["metrics"]},
         scenarios=scenarios, verdict=verdict, parity=parity,
         limitations=limitations(s.market, family=family),
-        validate_runs=s.record.validate_runs, currency=s.market.currency)
+        validate_runs=s.record.validate_runs, currency=s.market.currency, cycle=cycle)
     md, js = write_rule_card(card, cards_dir())
     return card, md, js
 
@@ -717,15 +844,22 @@ def periods(pocket: str, market: str, new_cycle: bool = False) -> dict:
         except PeriodError as e:
             raise LabError(str(e)) from e
         period_store.save_record(periods_path(pocket, market), rec)
+        ExperimentLog(experiments_path()).record(     # durable: a lost file is rebuilt in it
+            pocket, market, "-", "-", {}, "cycle_started", _iso(rec.periods.sealed),
+            {"cycle": rec.cycle, **{k: list(_iso(getattr(rec.periods, k)))
+                                    for k in ("train", "valid", "sealed")},
+             "data_cutoff": rec.data_cutoff.isoformat(),
+             "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     return {"path": str(periods_path(pocket, market)), "record": rec, "tickets": tickets}
 
 
 # ---------------------------------------------------------------- report / journal
 def report(pocket: str, market: str) -> Path:
     _check_market(market)
-    return write_leaderboard(ExperimentLog(experiments_path()), pocket, market,
-                             leaderboard_path(pocket, market),
-                             limitations=limitations(load_market_raw(market)))
+    out = leaderboard_path(pocket, market)
+    return write_leaderboard(ExperimentLog(experiments_path()), pocket, market, out,
+                             limitations=limitations(load_market_raw(market)),
+                             cards_rel=Path(os.path.relpath(cards_dir(), out.parent)).as_posix())
 
 
 def journal(memo: str, now: datetime | None = None) -> Path:

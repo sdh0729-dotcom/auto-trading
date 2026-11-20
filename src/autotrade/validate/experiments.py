@@ -1,4 +1,6 @@
-"""Append-only experiment log (jsonl). Every screened parameter set is one trial for DSR."""
+"""Append-only experiment log (jsonl). Every screened parameter set is one trial for DSR.
+Besides the research stages it holds one "cycle_started" row per `lab periods --new-cycle`
+(the new cycle's periods), so a lost periods file can be rebuilt in that cycle."""
 from __future__ import annotations
 
 import json
@@ -9,8 +11,8 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-Stage = Literal["screen", "validate", "final"]
-STAGES = ("screen", "validate", "final")
+Stage = Literal["screen", "validate", "final", "cycle_started"]
+STAGES = ("screen", "validate", "final", "cycle_started")
 _FIELDS = ["ts", "pocket", "market", "family", "rule_id", "params", "stage", "period", "metrics"]
 
 

@@ -117,7 +117,8 @@ def trading_dates(market: Market, start: date, end: date) -> pd.DatetimeIndex:
 
 def load_panel(market: Market, symbols: list[str] | None, start: date, end: date) -> Panel:
     """Wide OHLCV panel over [start, end] (inclusive) on the market's trading calendar
-    (dates dropped by `calendar` are left out). Days a symbol lacks are NaN."""
+    (dates dropped by `calendar` are left out). Days a symbol lacks are NaN. `Panel.calendar`
+    is every stored trading date (dates only, also past `end`)."""
     syms = symbols if symbols is not None else _stored_symbols(market)
     s, e = pd.Timestamp(start), pd.Timestamp(end)
     frames: dict[str, pd.DataFrame] = {}
@@ -128,9 +129,11 @@ def load_panel(market: Market, symbols: list[str] | None, start: date, end: date
         frames[sym] = df.loc[(df.index >= s) & (df.index <= e)]
     cols = list(frames)
     index = pd.DatetimeIndex([], name="date")
+    kept = None
     if frames:
         have = pd.DatetimeIndex(sorted(set().union(*(f.index for f in frames.values()))))
-        index = trading_dates(market, start, end)
+        kept, _ = calendar(market)
+        index = kept[(kept >= s) & (kept <= e)]
         index = index[index.isin(have)]
 
     def wide(col: str) -> pd.DataFrame:
@@ -145,4 +148,5 @@ def load_panel(market: Market, symbols: list[str] | None, start: date, end: date
         if c not in meta.columns:
             meta[c] = pd.Series(dtype=object)
     meta = meta[META_COLUMNS + [c for c in meta.columns if c not in META_COLUMNS]]
-    return Panel(wide("open"), wide("high"), wide("low"), wide("close"), wide("volume"), meta)
+    return Panel(wide("open"), wide("high"), wide("low"), wide("close"), wide("volume"), meta,
+                 kept)

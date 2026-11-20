@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.report.cards import _fmt
+from autotrade.report.cards import _fmt, card_stem
 from autotrade.screen.run import MIN_TRAIN_TRADES
 from autotrade.validate.experiments import ExperimentLog
 
@@ -29,16 +29,28 @@ def _latest(rows: pd.DataFrame, stage: str) -> pd.DataFrame:
     return rows[rows["stage"] == stage].drop_duplicates("rule_id", keep="last")
 
 
+def _cycle(m) -> int:
+    try:
+        return int(m.get("cycle", 1)) if isinstance(m, dict) else 1
+    except (TypeError, ValueError):
+        return 1
+
+
 def write_leaderboard(log: ExperimentLog, pocket: str, market: str, out: Path,
-                      limitations: list[str] | None = None) -> Path:
+                      limitations: list[str] | None = None,
+                      cards_rel: str = "rule-cards") -> Path:
     """Write the leaderboard markdown to `out`. `limitations` defaults to the market's fixed
-    limitations from its config."""
+    limitations from its config. Sealed verdicts are listed per rule x period cycle, each
+    linked to its card under `cards_rel` (relative to `out`)."""
     if limitations is None:
         from autotrade.config import load_market_raw
         from autotrade.report.limitations import limitations as _lim
         limitations = _lim(load_market_raw(market))
     rows = log.rows(pocket, market)
-    scr, val, fin = (_latest(rows, s) for s in ("screen", "validate", "final"))
+    scr, val = (_latest(rows, s) for s in ("screen", "validate"))
+    fin = rows[rows["stage"] == "final"]
+    fin = fin.assign(_cycle=[_cycle(m) for m in fin["metrics"]]).drop_duplicates(
+        ["rule_id", "_cycle"], keep="last").sort_values(["_cycle"], kind="stable")
     lines = [f"# 리더보드: {pocket} / {market}", "",
              f"- 생성: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
              f"- 시도 수(DSR, 거르기 파라미터 조합): {log.n_trials(pocket, market)}", ""]
@@ -79,13 +91,14 @@ def write_leaderboard(log: ExperimentLog, pocket: str, market: str, out: Path,
         lines += ["(봉인 판정 기록 없음)", ""]
     else:
         real = "real(참고용, 계획 2에서 확정)" if market == "us" else "real(실돈)"
-        lines += [f"| rule_id | paper(② 모의) | {real} | paper 탈락 | real 탈락 |",
-                  "|---|---|---|---|---|"]
-        for rid, m in zip(fin["rule_id"], fin["metrics"]):
+        lines += [f"| rule_id | cycle | paper(② 모의) | {real} | paper 탈락 | real 탈락 | 카드 |",
+                  "|---|---|---|---|---|---|---|"]
+        for rid, c, m in zip(fin["rule_id"], fin["_cycle"], fin["metrics"]):
             p, r = m.get("paper", {}), m.get("real", {})
-            lines.append(f"| {rid} | {_fmt(bool(p.get('passed')))} | "
+            card = f"{cards_rel}/{card_stem(pocket, market, rid, c)}.md"
+            lines.append(f"| {rid} | {c} | {_fmt(bool(p.get('passed')))} | "
                          f"{_fmt(bool(r.get('passed')))} | {_fmt(p.get('failed', []))} | "
-                         f"{_fmt(r.get('failed', []))} |")
+                         f"{_fmt(r.get('failed', []))} | [카드]({card}) |")
         lines.append("")
 
     lines += ["## 탈락 사유 분포", ""]

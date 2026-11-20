@@ -184,3 +184,44 @@ def test_ranking_with_universe_ignores_future(family):
     s2 = rule.signals(p, eligible=eligible_mask(p, mc, pc, lab, "paper", 1400.0))
     pd.testing.assert_frame_equal(s1.entries.iloc[:300], s2.entries.iloc[:300])
     pd.testing.assert_frame_equal(s1.exits.iloc[:300], s2.exits.iloc[:300])
+
+
+# ---------------------------------------------------------------- P7: tom and the panel end
+def _tom_entries(p, n=2):
+    return SWING_FAMILIES["tom"]({"n": n, "m": 3, "k": 2}).signals(p).entries["A"]
+
+
+@pytest.mark.parametrize("with_calendar", [False, True])
+def test_tom_truncated_panel_creates_no_entry_the_full_panel_lacks(with_calendar):
+    from dataclasses import replace
+    full = make_panel(300, ["A"], seed=3)
+    if with_calendar:
+        full = replace(full, calendar=full.close.index)
+    for n in (1, 2, 5):
+        ref = _tom_entries(full, n)
+        for t in range(150, 300):
+            cut = full.slice(full.close.index[0], full.close.index[t])
+            got = _tom_entries(cut, n)
+            extra = got & ~ref.loc[got.index]
+            assert not extra.any(), (n, full.close.index[t], list(extra[extra].index))
+
+
+def test_tom_final_month_needs_a_known_month_end():
+    from dataclasses import replace
+    full = make_panel(300, ["A"], seed=3)
+    idx = full.close.index
+    ref = _tom_entries(full)
+    jan = idx[idx.to_period("M") == pd.Period("2016-01")]
+    mar = idx[idx.to_period("M") == pd.Period("2016-03")]
+    assert jan[-1] == pd.Timestamp("2016-01-29") and mar[-1] == pd.Timestamp("2016-03-31")
+    # Jan 29 (Fri) is the month's last trading day, but only the calendar can tell
+    cut = full.slice(idx[0], jan[-1])
+    assert not _tom_entries(cut).any()
+    with_cal = replace(cut, calendar=idx)
+    assert _tom_entries(with_cal).equals(ref.loc[cut.close.index]) and ref.loc[jan].any()
+    # Mar 31 is the month's last calendar day: complete even without a calendar
+    cut = full.slice(idx[0], mar[-1])
+    assert _tom_entries(cut).equals(ref.loc[cut.close.index]) and ref.loc[mar].any()
+    # a calendar that ends at the panel end tells nothing more
+    mid = full.slice(idx[0], pd.Timestamp("2016-02-25"))
+    assert not _tom_entries(replace(mid, calendar=mid.close.index)).loc["2016-02"].any()

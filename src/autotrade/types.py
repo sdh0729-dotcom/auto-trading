@@ -25,13 +25,16 @@ class Panel:
     close: pd.DataFrame
     volume: pd.DataFrame
     meta: pd.DataFrame
+    # the market's trading dates (dates only, no prices; may run past the panel's last row,
+    # e.g. to tell whether that row is a month's last trading day); None if unknown
+    calendar: pd.DatetimeIndex | None = None
 
     def slice(self, start: date, end: date) -> "Panel":
-        """Inclusive on both ends; meta unchanged."""
+        """Inclusive on both ends; meta and calendar unchanged."""
         s, e = pd.Timestamp(start), pd.Timestamp(end)
         f = lambda df: df.loc[(df.index >= s) & (df.index <= e)]
         return Panel(f(self.open), f(self.high), f(self.low), f(self.close),
-                     f(self.volume), self.meta)
+                     f(self.volume), self.meta, self.calendar)
 
     @property
     def symbols(self) -> list[str]:

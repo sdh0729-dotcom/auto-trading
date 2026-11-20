@@ -429,3 +429,16 @@ def test_since_earlier_than_history_from_backfills(tmp_data):
     df = load_daily("kr", "X")
     assert df.index.min() == pd.Timestamp("2022-01-03")
     assert df.attrs["history_from"] == "2022-01-01"
+
+
+def test_load_panel_carries_the_market_calendar_through_slices(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTOTRADE_DATA", str(tmp_path))
+    idx = pd.bdate_range("2024-01-01", periods=30)
+    df = pd.DataFrame({"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0},
+                      index=idx)
+    for sym in ("A", "B"):
+        save_daily("kr", sym, df)
+    p = load_panel("kr", None, date(2024, 1, 1), date(2024, 1, 10))
+    assert p.close.index[-1] == pd.Timestamp("2024-01-10")
+    assert p.calendar.equals(trading_dates("kr", date(2000, 1, 1), date(2100, 1, 1)))
+    assert p.slice(date(2024, 1, 2), date(2024, 1, 5)).calendar.equals(p.calendar)

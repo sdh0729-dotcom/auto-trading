@@ -5,6 +5,8 @@ trading dates stored at that moment (`data_cutoff` = the last one) and is read b
 command, so data collected afterwards never moves a boundary (spec 7.8). `new_cycle` starts a
 re-validation cycle (spec 7.9): train / valid stay, the new sealed period is the data after
 the previous sealed end, allowed only with >= MIN_NEW_CYCLE_DAYS new trading days.
+`rebuild_record` restores a lost file from the seal tickets (their sealed period and data
+cutoff) instead of re-splitting.
 """
 from __future__ import annotations
 
@@ -57,6 +59,62 @@ def new_cycle(rec: PeriodRecord, dates: pd.DatetimeIndex) -> PeriodRecord:
            rec.data_cutoff.isoformat())
     return replace(rec, periods=replace(rec.periods, sealed=sealed), data_cutoff=sealed[1],
                    cycle=rec.cycle + 1, history=rec.history + (old,))
+
+
+def rebuild_record(pocket: str, market: str, tickets, dates: pd.DatetimeIndex, fractions,
+                   validate_runs: int = 0, train=None, valid=None,
+                   started: dict | None = None) -> PeriodRecord:
+    """A lost period file rebuilt from the seal tickets of `pocket` x `market` instead of a
+    fresh split (which data collected since could move over an opened seal). Cycle 1 is
+    re-split from the stored trading `dates` through the cycle-1 tickets' data cutoff, each
+    later cycle is `new_cycle` through its tickets' cutoff; every result must reproduce the
+    sealed period the tickets opened, and of a cycle in `started` ({cycle: (sealed start,
+    sealed end, data cutoff)}, the logged `lab periods --new-cycle` records, which also
+    cover a cycle without any ticket yet) the sealed period logged for it. The rebuilt
+    train / valid must equal `train` / `valid`
+    (ISO [start, end] pairs, e.g. the periods last logged by screen / validate) where given.
+    Raises PeriodError when the tickets lack the sealed period / data cutoff, disagree with
+    each other, or the rebuilt periods do not match."""
+    by_cycle: dict[int, set] = {}
+    for t in tickets:
+        if not (t.sealed_start and t.sealed_end and t.data_cutoff):
+            raise PeriodError(f"seal ticket {t.rule_id} (cycle {t.cycle}) has no sealed period "
+                              "or data cutoff")
+        by_cycle.setdefault(int(t.cycle), set()).add(
+            (t.sealed_start, t.sealed_end, t.data_cutoff))
+    if 1 not in by_cycle:
+        raise PeriodError("no cycle-1 seal ticket to rebuild from")
+    for cycle, v in (started or {}).items():
+        if int(cycle) >= 2:
+            by_cycle.setdefault(int(cycle), set()).add(tuple(str(x) for x in v))
+    if sorted(by_cycle) != list(range(1, max(by_cycle) + 1)):
+        raise PeriodError(f"seal tickets / cycle_started records cover cycles "
+                          f"{sorted(by_cycle)}, not 1..{max(by_cycle)}")
+    idx = pd.DatetimeIndex(dates)
+    rec = None
+    for cycle in sorted(by_cycle):
+        if len(by_cycle[cycle]) != 1:
+            raise PeriodError(f"seal tickets / cycle_started record of cycle {cycle} disagree "
+                              f"on the sealed period / data cutoff: {sorted(by_cycle[cycle])}")
+        s0, s1, cutoff = next(iter(by_cycle[cycle]))
+        upto = idx[idx <= pd.Timestamp(cutoff)]
+        try:
+            rec = (new_record(pocket, market, upto, fractions) if rec is None
+                   else new_cycle(rec, upto))
+        except ValueError as e:      # PeriodError is not a ValueError: both are reported
+            raise PeriodError(f"cycle {cycle}: {e}") from e
+        got = (rec.periods.sealed[0].isoformat(), rec.periods.sealed[1].isoformat(),
+               rec.data_cutoff.isoformat())
+        if got != (s0, s1, cutoff):
+            raise PeriodError(f"cycle {cycle}: the stored dates through {cutoff} give sealed "
+                              f"{got[0]}~{got[1]} (cutoff {got[2]}), the tickets / "
+                              f"cycle_started record have {s0}~{s1} (cutoff {cutoff})")
+    for name, want in (("train", train), ("valid", valid)):
+        got = _iso(getattr(rec.periods, name))
+        if want is not None and got != [str(want[0]), str(want[1])]:
+            raise PeriodError(f"the rebuilt {name} {got[0]}~{got[1]} differs from the logged "
+                              f"{name} {want[0]}~{want[1]}")
+    return replace(rec, validate_runs=int(validate_runs))
 
 
 def _iso(p: tuple[date, date]) -> list[str]:

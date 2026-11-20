@@ -1,10 +1,13 @@
 """Research workflow behind the `lab` CLI: sync -> collect -> universe -> screen -> validate
 -> verify --final -> report -> journal.
 
-Periods: the stored trading dates from `lab.swing_start` on are split by `lab.split` into
-train / valid / sealed. `screen` loads prices only through the train end, `validate` only
-through the valid end; the sealed prices are loaded by `verify_final` after it has opened
-the seal ticket. Signals are always computed on the panel history through the end of the
+Periods: on the first `screen` of a pocket x market the stored trading dates from
+`lab.swing_start` on are split by `lab.split` into train / valid / sealed and persisted in
+research/periods-{pocket}-{market}.json (with the data cutoff); every later command reads that
+file, so later collects never move a boundary (`lab periods --new-cycle` starts a
+re-validation cycle, spec 7.9). `screen` loads prices only through the train end, `validate`
+only through the valid end, and both refuse ranges overlapping an already-opened sealed
+period; the sealed prices are loaded by `verify_final` after it has opened the seal ticket. Signals are always computed on the panel history through the end of the
 period being evaluated (warm-up), while simulate / run_portfolio / run_nautilus are limited
 to the period itself.
 """
@@ -28,7 +31,8 @@ from autotrade.costs import CostModel
 from autotrade.data.collect import collect_daily, collect_meta
 from autotrade.data.delisted_kr import supplement_delisted_kr
 from autotrade.data.quality import check_daily, hard_issues
-from autotrade.data.store import calendar, data_root, load_daily, load_panel, trading_dates
+from autotrade.data.store import (calendar, data_root, load_daily, load_panel, stored_symbols,
+                                  trading_dates)
 from autotrade.report import (CONFIDENCE_FORMULAS, RuleCard, limitations, write_leaderboard,
                               write_rule_card)
 from autotrade.rules.registry import SWING_FAMILIES
@@ -40,9 +44,11 @@ from autotrade.types import Panel
 from autotrade.universe.build import eligible_mask
 from autotrade.validate.criteria import evaluate, period_equity
 from autotrade.validate.experiments import ExperimentLog
+from autotrade.validate import periods as period_store
 from autotrade.validate.pbo import pbo_cscv
-from autotrade.validate.seal import SealRegistry
-from autotrade.validate.split import Periods, split_periods, walk_forward_windows
+from autotrade.validate.periods import PeriodError, PeriodRecord
+from autotrade.validate.seal import SealRegistry, SealViolation
+from autotrade.validate.split import Periods, walk_forward_windows
 from autotrade.validate.stats import max_drawdown, sharpe
 from autotrade.verify import parity_report, run_nautilus
 
@@ -76,6 +82,10 @@ def seal_path() -> Path:
     return research_root() / "seal-registry.json"
 
 
+def periods_path(pocket: str, market: str) -> Path:
+    return research_root() / f"periods-{pocket}-{market}.json"
+
+
 def cards_dir() -> Path:
     return research_root() / "rule-cards"
 
@@ -100,7 +110,8 @@ class Setup:
     lab: LabConfig
     synced: SyncedValues
     periods: Periods
-    calendar: pd.DatetimeIndex   # all stored trading dates from lab.swing_start
+    calendar: pd.DatetimeIndex   # stored trading dates from lab.swing_start to the data cutoff
+    record: PeriodRecord
 
 
 def _check_market(market: str) -> None:
@@ -115,19 +126,48 @@ def _families(pocket: str) -> dict:
     return FAMILIES[pocket]
 
 
-def _setup(pocket: str, market: str) -> Setup:
-    """Configs + period split from the stored trading dates (no prices are read)."""
+def _load_periods(pocket: str, market: str) -> PeriodRecord | None:
+    try:
+        return period_store.load_record(periods_path(pocket, market))
+    except PeriodError as e:
+        raise LabError(str(e)) from e
+
+
+def _setup(pocket: str, market: str, create: bool = False) -> Setup:
+    """Configs + the persisted period split (no prices are read). Only `create` (the first
+    `screen`) may split the stored trading dates and write the period file."""
     _check_market(market)
     _families(pocket)
     mc, pc, lab, synced = load_market(market), load_pocket(pocket), load_lab(), load_synced()
-    cal = trading_dates(market, lab.swing_start, date.today())
+    rec = _load_periods(pocket, market)
+    if rec is None:
+        if not create:
+            raise LabError(f"no periods for {pocket}/{market}: run `lab screen` first")
+        cal = trading_dates(market, lab.swing_start, date.today())
+        if len(cal) == 0:
+            raise LabError(f"no daily data for {market}: run `lab collect --market {market}` "
+                           "first")
+        try:
+            rec = period_store.new_record(pocket, market, cal, lab.split)
+        except ValueError as e:
+            raise LabError(f"not enough daily data for {market} to split periods: {e}") from e
+        period_store.save_record(periods_path(pocket, market), rec)
+    cal = trading_dates(market, lab.swing_start, rec.data_cutoff)
     if len(cal) == 0:
         raise LabError(f"no daily data for {market}: run `lab collect --market {market}` first")
-    try:
-        periods = split_periods(cal, lab.split)
-    except ValueError as e:
-        raise LabError(f"not enough daily data for {market} to split periods: {e}") from e
-    return Setup(mc, pc, lab, synced, periods, cal)
+    return Setup(mc, pc, lab, synced, rec.periods, cal, rec)
+
+
+def _refuse_opened_overlap(pocket: str, market: str, start: date, end: date,
+                           what: str) -> None:
+    """screen / validate never touch a sealed period that some rule already opened."""
+    for t in SealRegistry(seal_path()).tickets(pocket, market):
+        if t.sealed is None:
+            continue
+        s0, s1 = (date.fromisoformat(x) for x in t.sealed)
+        if start <= s1 and s0 <= end:
+            raise SealViolation(f"{what} range {start}~{end} overlaps the sealed period "
+                                f"{s0}~{s1} already opened (rule {t.rule_id})")
 
 
 def _panel(s: Setup, end: date) -> Panel:
@@ -303,13 +343,14 @@ def universe(market: str, pocket: str, scenario: str, day: date) -> list[str]:
 def screen(pocket: str, market: str, family: str = "all") -> pd.DataFrame:
     """Every grid point of the chosen families on the train period (fixed amount, paper
     universe), logged as screen trials; sorted by mean_net_r."""
-    s = _setup(pocket, market)
+    s = _setup(pocket, market, create=True)
     fams = _families(pocket)
     names = list(fams) if family == "all" else [family]
     for n in names:
         if n not in fams:
             raise LabError(f"unknown family {n!r} (choose from all, {', '.join(fams)})")
     t0, t1 = s.periods.train
+    _refuse_opened_overlap(pocket, market, t0, t1, "screen")
     panel = _panel(s, t1)
     elig = eligible_mask(panel, s.market, s.pocket, s.lab, "paper", s.synced.usd_krw)
     cm = _cost_model(s.market, panel.meta)
@@ -373,6 +414,7 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
         raise LabError(f"no screened rule has >= {MIN_TRAIN_TRADES} train trades")
 
     (t0, _), (v0, v1) = s.periods.train, s.periods.valid
+    _refuse_opened_overlap(pocket, market, t0, v1, "validate")
     panel = _panel(s, v1)
     cal = panel.close.index
     elig = eligible_mask(panel, s.market, s.pocket, s.lab, "paper", s.synced.usd_krw)
@@ -552,7 +594,14 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
     sr_var = _sr_var_trials(rows)
 
     registry = SealRegistry(seal_path(), s.lab.criteria.max_final_candidates)
-    ticket = registry.open(pocket, market, rule_id)          # before any sealed price is read
+    cycle = s.record.cycle
+    allowed = None
+    if cycle > 1:            # spec 7.9: re-validate only the previous cycle's final candidates
+        allowed = {t.rule_id for t in registry.tickets(pocket, market) if t.cycle == cycle - 1}
+    ticket = registry.open(pocket, market, rule_id, sealed=_iso(s.periods.sealed),
+                           data_cutoff=s.record.data_cutoff.isoformat(),
+                           n_symbols=len(stored_symbols(market)), cycle=cycle,
+                           allowed_rules=allowed)    # before any sealed price is read
     panel = _panel(s, s.periods.sealed[1])
     sealed = registry.load_sealed(panel, s.periods, ticket)  # validates the ticket
     if not sealed.close.index.equals(s.calendar[(s.calendar >= pd.Timestamp(
@@ -580,6 +629,30 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
     return card, md, js
 
 
+# ---------------------------------------------------------------- periods
+def periods(pocket: str, market: str, new_cycle: bool = False) -> dict:
+    """The persisted periods of pocket x market and the seal tickets opened on them;
+    `new_cycle` first starts a re-validation cycle (spec 7.9): needs a final candidate opened
+    in the current cycle and >= 63 trading days stored after the current sealed end."""
+    _check_market(market)
+    _families(pocket)
+    rec = _load_periods(pocket, market)
+    if rec is None:
+        raise LabError(f"no periods for {pocket}/{market}: run `lab screen` first")
+    tickets = SealRegistry(seal_path()).tickets(pocket, market)
+    if new_cycle:
+        if not any(t.cycle == rec.cycle for t in tickets):
+            raise LabError(f"no final candidate opened the seal in cycle {rec.cycle}: "
+                           "nothing to re-validate")
+        dates = trading_dates(market, load_lab().swing_start, date.today())
+        try:
+            rec = period_store.new_cycle(rec, dates)
+        except PeriodError as e:
+            raise LabError(str(e)) from e
+        period_store.save_record(periods_path(pocket, market), rec)
+    return {"path": str(periods_path(pocket, market)), "record": rec, "tickets": tickets}
+
+
 # ---------------------------------------------------------------- report / journal
 def report(pocket: str, market: str) -> Path:
     _check_market(market)
@@ -600,5 +673,5 @@ def journal(memo: str, now: datetime | None = None) -> Path:
     return path
 
 
-__all__ = ["ConfigError", "LabError", "collect", "journal", "nautilus_result", "report",
-           "screen", "sync", "universe", "validate", "verify_final"]
+__all__ = ["ConfigError", "LabError", "collect", "journal", "nautilus_result", "periods",
+           "report", "screen", "sync", "universe", "validate", "verify_final"]

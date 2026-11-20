@@ -76,6 +76,11 @@ def _stored_symbols(market: Market) -> list[str]:
     return sorted(p.stem for p in d.glob("*.parquet")) if d.exists() else []
 
 
+def stored_symbols(market: Market) -> list[str]:
+    """Symbols with a stored daily file (no file is read)."""
+    return _stored_symbols(market)
+
+
 def calendar(market: Market) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
     """(trading dates, dropped dates) over all stored daily files, read without any price.
 

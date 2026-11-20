@@ -148,6 +148,30 @@ def verify(final: bool = typer.Option(False, "--final",
 
 @app.command()
 @_expected_errors
+def periods(pocket: str = typer.Option("swing"),
+            market: str = typer.Option(..., help="kr | us"),
+            new_cycle: bool = typer.Option(False, "--new-cycle",
+                                           help="start a re-validation cycle (spec 7.9)")):
+    """Show the persisted train / valid / sealed periods (or start a new cycle)."""
+    out = pipeline.periods(pocket, market, new_cycle)
+    rec = out["record"]
+    if new_cycle:
+        typer.echo(f"started cycle {rec.cycle}")
+    for name in ("train", "valid", "sealed"):
+        a, b = getattr(rec.periods, name)
+        typer.echo(f"{name:7s} {a} ~ {b}")
+    typer.echo(f"data cutoff {rec.data_cutoff} | cycle {rec.cycle} | validate runs "
+               f"{rec.validate_runs} | created {rec.created_at}")
+    for h in rec.history:
+        typer.echo(f"earlier sealed {h[0]} ~ {h[1]} (cutoff {h[2]})")
+    for t in out["tickets"]:
+        typer.echo(f"opened: {t.rule_id} cycle {t.cycle} sealed "
+                   f"{t.sealed_start or '?'} ~ {t.sealed_end or '?'} at {t.opened_at}")
+    typer.echo(f"file: {out['path']}")
+
+
+@app.command()
+@_expected_errors
 def report(pocket: str = typer.Option("swing"), market: str = typer.Option(..., help="kr | us")):
     """Write the leaderboard for one pocket x market."""
     typer.echo(f"leaderboard: {pipeline.report(pocket, market)}")

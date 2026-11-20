@@ -133,3 +133,72 @@ def test_load_sealed_requires_issued_ticket(tmp_path):
         SealRegistry(tmp_path / "other.json").load_sealed(panel, periods, ticket)
     with pytest.raises(SealViolation):
         reg.load_sealed(panel, periods, None)
+
+
+# --- persisted periods (C1) ------------------------------------------------------------------
+from autotrade.validate.periods import (MIN_NEW_CYCLE_DAYS, PeriodError, PeriodRecord,  # noqa: E402
+                                        load_record, new_cycle, new_record, save_record)
+
+
+def test_period_record_round_trip(tmp_path):
+    rec = new_record("swing", "kr", DATES, (0.6, 0.2, 0.2))
+    assert rec.periods == split_periods(DATES, (0.6, 0.2, 0.2))
+    assert rec.data_cutoff == DATES[-1].date() and rec.cycle == 1 and rec.validate_runs == 0
+    path = tmp_path / "periods-swing-kr.json"
+    save_record(path, rec)
+    assert load_record(path) == rec
+    assert load_record(tmp_path / "missing.json") is None
+    d = json.loads(path.read_text(encoding="utf-8"))
+    assert d["sealed"] == [rec.periods.sealed[0].isoformat(), rec.periods.sealed[1].isoformat()]
+    assert d["data_cutoff"] == DATES[-1].date().isoformat() and d["created_at"]
+    assert [f.name for f in tmp_path.iterdir()] == ["periods-swing-kr.json"]
+
+
+def test_new_cycle_needs_63_new_trading_days():
+    rec = new_record("swing", "kr", DATES, (0.6, 0.2, 0.2))
+    more = pd.bdate_range(DATES[0], periods=len(DATES) + MIN_NEW_CYCLE_DAYS - 1, name="date")
+    with pytest.raises(PeriodError, match="63"):
+        new_cycle(rec, more)
+    more = pd.bdate_range(DATES[0], periods=len(DATES) + MIN_NEW_CYCLE_DAYS, name="date")
+    nxt = new_cycle(rec, more)
+    assert nxt.periods.train == rec.periods.train and nxt.periods.valid == rec.periods.valid
+    assert nxt.periods.sealed == (more[len(DATES)].date(), more[-1].date())
+    assert nxt.data_cutoff == more[-1].date() and nxt.cycle == 2
+    assert nxt.history == ((rec.periods.sealed[0].isoformat(), rec.periods.sealed[1].isoformat(),
+                            rec.data_cutoff.isoformat()),)
+
+
+def test_seal_ticket_records_period_cutoff_and_symbols(tmp_path):
+    reg = SealRegistry(tmp_path / "s.json")
+    t = reg.open("swing", "kr", "a", sealed=("2024-01-02", "2025-12-30"),
+                 data_cutoff="2025-12-30", n_symbols=812, cycle=1)
+    row = json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["tickets"][0]
+    assert (row["sealed_start"], row["sealed_end"], row["data_cutoff"], row["n_symbols"],
+            row["cycle"]) == ("2024-01-02", "2025-12-30", "2025-12-30", 812, 1)
+    assert reg.tickets("swing", "kr") == [t]
+
+
+def test_new_cycle_reopens_only_previous_final_candidates(tmp_path):
+    reg = SealRegistry(tmp_path / "s.json")
+    for r in ["a", "b"]:
+        reg.open("swing", "kr", r, sealed=("2024-01-02", "2025-12-30"), cycle=1)
+    with pytest.raises(SealReuseError):
+        reg.open("swing", "kr", "a", sealed=("2024-01-02", "2025-12-30"), cycle=1)
+    prev = {t.rule_id for t in reg.tickets("swing", "kr") if t.cycle == 1}
+    reg.open("swing", "kr", "a", sealed=("2026-01-02", "2026-04-30"), cycle=2,
+             allowed_rules=prev)                                 # re-validation of a
+    with pytest.raises(SealViolation, match="previous final candidates"):
+        reg.open("swing", "kr", "z", sealed=("2026-01-02", "2026-04-30"), cycle=2,
+                 allowed_rules=prev)
+    with pytest.raises(SealReuseError):
+        reg.open("swing", "kr", "a", sealed=("2026-01-02", "2026-04-30"), cycle=2,
+                 allowed_rules=prev)
+
+
+def test_load_sealed_rejects_ticket_of_another_sealed_period(tmp_path):
+    panel = make_panel(300, ["A", "B"], seed=3)
+    periods = split_periods(panel.close.index)
+    reg = SealRegistry(tmp_path / "s.json")
+    ticket = reg.open("swing", "kr", "a", sealed=("2016-01-04", "2016-02-01"))
+    with pytest.raises(SealViolation, match="sealed period"):
+        reg.load_sealed(panel, periods, ticket)

@@ -73,6 +73,20 @@ def first_recommended_rule_id(env: CliEnv) -> str:
     return rec[0]
 
 
+def extend_store(n: int, market: str = "kr") -> pd.DatetimeIndex:
+    """A later `lab collect`: append n new business days (last bar repeated) to every symbol."""
+    for f in sorted((store.data_root() / market / "1d").glob("*.parquet")):
+        df = store.load_daily(market, f.stem)
+        new_idx = pd.bdate_range(df.index[-1], periods=n + 1)[1:]
+        more = pd.DataFrame([df.iloc[-1].to_dict()] * n, index=new_idx)
+        store.save_daily(market, f.stem, pd.concat([df, more]))
+    return new_idx
+
+
+def periods_file(env: CliEnv, pocket="swing", market="kr") -> Path:
+    return env.research / f"periods-{pocket}-{market}.json"
+
+
 def periods_of(env: CliEnv):
     idx = pd.bdate_range("2016-01-04", periods=N_DAYS)
     return split_periods(idx, (0.6, 0.2, 0.2))
@@ -445,3 +459,70 @@ def test_sync_missing_credentials_is_one_line_error(cli_env, monkeypatch):
                                  "0.001"])
     assert r.exit_code == 1 and "TOSS_CLIENT_ID" in r.output
     assert len(r.output.strip().splitlines()) == 1
+
+
+def test_periods_fixed_on_first_screen_and_stable_across_collect(cli_env):
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    rec = json.loads(periods_file(cli_env).read_text(encoding="utf-8"))
+    per = periods_of(cli_env)
+    assert rec["sealed"] == [per.sealed[0].isoformat(), per.sealed[1].isoformat()]
+    assert rec["data_cutoff"] == per.sealed[1].isoformat()
+    extend_store(100)                                   # new data after the first screen
+    run(["validate", "--pocket", "swing", "--market", "kr", "--top", "2"])
+    rows = ExperimentLog(cli_env.research / "experiments.jsonl").rows("swing", "kr")
+    val = rows[rows["stage"] == "validate"]
+    assert all(p == [per.valid[0].isoformat(), per.valid[1].isoformat()] for p in val["period"])
+    after = json.loads(periods_file(cli_env).read_text(encoding="utf-8"))
+    assert {k: after[k] for k in ("train", "valid", "sealed", "data_cutoff")} == \
+        {k: rec[k] for k in ("train", "valid", "sealed", "data_cutoff")}
+    r = run(["periods", "--pocket", "swing", "--market", "kr"])
+    assert per.sealed[0].isoformat() in r.output and "data cutoff" in r.output
+
+
+def test_validate_and_verify_need_periods_from_screen(cli_env):
+    r = CliRunner().invoke(app, ["validate", "--pocket", "swing", "--market", "kr"])
+    assert r.exit_code == 1 and "lab screen" in r.output
+    assert not periods_file(cli_env).exists()
+
+
+def test_screen_and_validate_refuse_ranges_overlapping_an_opened_seal(cli_env):
+    from autotrade.validate.seal import SealRegistry
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    per = periods_of(cli_env)
+    SealRegistry(cli_env.research / "seal-registry.json").open(
+        "swing", "kr", "breakout:x", sealed=(per.sealed[0].isoformat(),
+                                             per.sealed[1].isoformat()))
+    periods_file(cli_env).unlink()                       # periods lost, data grew: re-split
+    extend_store(100)
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    r = CliRunner().invoke(app, ["validate", "--pocket", "swing", "--market", "kr"])
+    assert r.exit_code == 1 and "opened" in r.output and "Traceback" not in r.output
+    periods_file(cli_env).unlink()
+    extend_store(300)                                    # now even the train range overlaps
+    r = CliRunner().invoke(app, ["screen", "--pocket", "swing", "--market", "kr",
+                                 "--family", "breakout"])
+    assert r.exit_code == 1 and "opened" in r.output
+
+
+def test_periods_new_cycle_preconditions(cli_env):
+    from autotrade.validate.seal import SealRegistry
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    per = periods_of(cli_env)
+    r = CliRunner().invoke(app, ["periods", "--pocket", "swing", "--market", "kr",
+                                 "--new-cycle"])
+    assert r.exit_code == 1 and "no final candidate" in r.output
+    SealRegistry(cli_env.research / "seal-registry.json").open(
+        "swing", "kr", "breakout:x", sealed=(per.sealed[0].isoformat(),
+                                             per.sealed[1].isoformat()), cycle=1)
+    extend_store(62)
+    r = CliRunner().invoke(app, ["periods", "--pocket", "swing", "--market", "kr",
+                                 "--new-cycle"])
+    assert r.exit_code == 1 and "63" in r.output
+    new_days = extend_store(1)
+    run(["periods", "--pocket", "swing", "--market", "kr", "--new-cycle"])
+    rec = json.loads(periods_file(cli_env).read_text(encoding="utf-8"))
+    assert rec["cycle"] == 2 and rec["data_cutoff"] == new_days[-1].date().isoformat()
+    assert rec["train"] == [per.train[0].isoformat(), per.train[1].isoformat()]
+    assert rec["valid"] == [per.valid[0].isoformat(), per.valid[1].isoformat()]
+    first_new = pd.bdate_range(per.sealed[1], periods=2)[1]
+    assert rec["sealed"] == [first_new.date().isoformat(), new_days[-1].date().isoformat()]

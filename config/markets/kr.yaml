@@ -1,0 +1,18 @@
+# Tick table (upper bound exclusive, tick). Last bound .inf.
+# unverified against KRX official — verify in Task 15
+# (official page https://regulation.krx.co.kr was reachable but the table was not machine-readable)
+market: kr
+currency: KRW
+sell_tax_rate: {stock: 0.0020, etf: 0.0}
+tick_table:
+  stock: [[2000, 1], [5000, 5], [20000, 10], [50000, 50], [200000, 100], [500000, 500], [.inf, 1000]]
+  etf: [[2000, 1], [.inf, 5]]
+slippage_ticks: 1
+max_tick_cost_pct: 0.001
+always_include: ["069500", "102110"]
+session_open: "09:00"
+session_close: "15:30"
+closing_auction_start: "15:20"
+exclude_name_keywords: ["레버리지", "인버스", "2X", "스팩"]
+delisted_supplement: true
+fractional_orders: false

@@ -1,0 +1,13 @@
+market: us
+currency: USD
+sell_tax_rate: {stock: 0.0, etf: 0.0}
+sec_fee_rate: 0.0000206
+slippage_min_pct: 0.0005
+slippage_min_abs: 0.02
+min_price: 5.0
+min_avg_volume_14d: 1000000
+always_include: ["SPY", "QQQ"]
+# ASCII keywords match whole words (Short excludes "ProShares Short QQQ", not "Short-Term")
+exclude_name_keywords: ["레버리지", "인버스", "2X", "3X", "울트라", "숏", "Ultra", "UltraPro", "UltraShort", "Bear", "Short", "Inverse"]
+delisted_supplement: false
+fractional_orders: true

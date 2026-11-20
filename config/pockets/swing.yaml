@@ -1,0 +1,6 @@
+risk_per_trade: 0.01
+max_position_weight: 0.25
+max_positions: 4
+drawdown_stop: 0.15
+daily_loss_stop: 0.03
+hold_days: [2, 20]

@@ -724,6 +724,7 @@ def test_cli_end_to_end_on_synthetic(cli_env):
 
 - [ ] **Step 1:** `uv run lab sync` → `config/synced.yaml`에 국내·미국 수수료율·환율 기록 확인. 미국 수수료가 0.001과 다르면 조사 문서 8.1의 비용(R) 계산을 갱신.
 - [ ] **Step 2:** `uv run lab collect --market kr --limit 20` 시험 수집 → 품질 요약 확인 → 제한 없이 야간 실행. 미국 동일.
+- [ ] **Step 2a (NXT 확인):** NXT 상장 종목 1개(예: 005930)의 2025-03 이후 일봉을 토스(`data/kr/1d/005930.parquet`)와 pykrx(`stock.get_market_ohlcv`, KRX 정규장)로 같은 기간 비교 → 종가·거래량 차이를 실험 일지에 기록. 차이가 크면 규칙 카드의 "KRX+NXT 통합 시세" 한계 문구를 근거와 함께 갱신하고 정규장 재구성 여부를 사용자와 결정.
 - [ ] **Step 3:** 계열별 `lab screen --family all` (kr, us) → `lab validate --top 10` → 추천 상위 ≤3개 `lab verify --final`.
 - [ ] **Step 4:** `lab report`로 리더보드, 실험 일지에 결과·탈락 사유 요약 (블로그 원고 재료).
 - [ ] **Step 5:** 결과를 사용자에게 보고하고 계획 2(단타)로 진행. 전원 탈락이면 스펙 7.9 경로 기록.

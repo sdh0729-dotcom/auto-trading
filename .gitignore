@@ -1,2 +1,9 @@
 .superpowers/
 .worktrees/
+/data/
+.env
+.venv/
+config/synced.yaml
+*.token.json
+__pycache__/
+/vendor/

@@ -1047,3 +1047,47 @@ def test_rebuild_needs_logged_screen_and_validate_periods(cli_env):
                                  "--family", "breakout"])
     assert r.exit_code == 1 and "validate" in r.output
     assert not periods_file(cli_env).exists()
+
+
+def _cycle_two_without_ticket(env):
+    """Cycle 1 opened and validated, then `lab periods --new-cycle`: no cycle-2 ticket yet."""
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    per = periods_of(env)
+    _open_ticket(env, "breakout:x", per.sealed, per.sealed[1])
+    ExperimentLog(env.research / "experiments.jsonl").record(
+        "swing", "kr", "breakout", "breakout:x", {}, "validate", pipeline._iso(per.valid),
+        {"valid_daily_sharpe": 0.1, "validate_run": 1})
+    extend_store(70)
+    run(["periods", "--pocket", "swing", "--market", "kr", "--new-cycle"])
+    return json.loads(periods_file(env).read_text(encoding="utf-8"))
+
+
+def test_new_cycle_is_logged_and_a_lost_file_is_rebuilt_in_it(cli_env):
+    before = _cycle_two_without_ticket(cli_env)
+    rows = ExperimentLog(cli_env.research / "experiments.jsonl").rows("swing", "kr")
+    started = rows[rows["stage"] == "cycle_started"]
+    assert len(started) == 1
+    m = started.iloc[0]["metrics"]
+    assert m["cycle"] == 2 and m["sealed"] == before["sealed"]
+    assert m["data_cutoff"] == before["data_cutoff"] and m["train"] == before["train"]
+    assert m["valid"] == before["valid"] and m["started_at"]
+    assert list(started.iloc[0]["period"]) == before["sealed"]
+    periods_file(cli_env).unlink()
+    extend_store(5)
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    after = json.loads(periods_file(cli_env).read_text(encoding="utf-8"))
+    assert after["cycle"] == 2 and _split_keys(after) == _split_keys(before)
+
+
+def test_rebuild_refuses_a_logged_cycle_it_cannot_reproduce(cli_env):
+    before = _cycle_two_without_ticket(cli_env)
+    log = ExperimentLog(cli_env.research / "experiments.jsonl")
+    bad = pd.bdate_range(before["sealed"][0], periods=3)[-1].date().isoformat()
+    log.record("swing", "kr", "-", "-", {}, "cycle_started", (bad, before["sealed"][1]),
+               {"cycle": 2, "sealed": [bad, before["sealed"][1]],
+                "data_cutoff": before["data_cutoff"]})            # e.g. a hand-edited log
+    periods_file(cli_env).unlink()
+    r = CliRunner().invoke(app, ["screen", "--pocket", "swing", "--market", "kr",
+                                 "--family", "breakout"])
+    assert r.exit_code == 1 and "cycle 2" in r.output and "Traceback" not in r.output
+    assert not periods_file(cli_env).exists()

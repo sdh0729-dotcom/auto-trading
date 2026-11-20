@@ -167,6 +167,17 @@ def _logged_period(rows: pd.DataFrame, stage: str) -> list[str] | None:
     return [str(x) for x in rows.iloc[-1]["period"]] if len(rows) else None
 
 
+def _logged_cycles(rows: pd.DataFrame) -> dict[int, tuple[str, str, str]]:
+    """{cycle: (sealed start, sealed end, data cutoff)} of the latest "cycle_started" row
+    per cycle (written by `lab periods --new-cycle`)."""
+    out = {}
+    started = rows[rows["stage"] == "cycle_started"]
+    for p, m in zip(started["period"], started["metrics"]):
+        if isinstance(m, dict) and "cycle" in m:
+            out[int(m["cycle"])] = (str(p[0]), str(p[1]), str(m.get("data_cutoff", "")))
+    return out
+
+
 def _new_periods(pocket: str, market: str, lab: LabConfig) -> PeriodRecord:
     """The period record for a missing file: rebuilt from the seal tickets when some exist
     (a fresh split could move over an opened seal), else split from the stored dates. A
@@ -181,7 +192,8 @@ def _new_periods(pocket: str, market: str, lab: LabConfig) -> PeriodRecord:
         try:
             rec = period_store.rebuild_record(pocket, market, tickets, cal, lab.split,
                                               train=logged["screen"],
-                                              valid=logged["validate"])
+                                              valid=logged["validate"],
+                                              started=_logged_cycles(rows))
             missing = [st for st, p in logged.items() if p is None]
             if missing:
                 raise PeriodError(f"no logged {' / '.join(missing)} period to check the "
@@ -827,6 +839,12 @@ def periods(pocket: str, market: str, new_cycle: bool = False) -> dict:
         except PeriodError as e:
             raise LabError(str(e)) from e
         period_store.save_record(periods_path(pocket, market), rec)
+        ExperimentLog(experiments_path()).record(     # durable: a lost file is rebuilt in it
+            pocket, market, "-", "-", {}, "cycle_started", _iso(rec.periods.sealed),
+            {"cycle": rec.cycle, **{k: list(_iso(getattr(rec.periods, k)))
+                                    for k in ("train", "valid", "sealed")},
+             "data_cutoff": rec.data_cutoff.isoformat(),
+             "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     return {"path": str(periods_path(pocket, market)), "record": rec, "tickets": tickets}
 
 

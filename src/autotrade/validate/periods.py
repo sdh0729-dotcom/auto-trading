@@ -62,12 +62,16 @@ def new_cycle(rec: PeriodRecord, dates: pd.DatetimeIndex) -> PeriodRecord:
 
 
 def rebuild_record(pocket: str, market: str, tickets, dates: pd.DatetimeIndex, fractions,
-                   validate_runs: int = 0, train=None, valid=None) -> PeriodRecord:
+                   validate_runs: int = 0, train=None, valid=None,
+                   started: dict | None = None) -> PeriodRecord:
     """A lost period file rebuilt from the seal tickets of `pocket` x `market` instead of a
     fresh split (which data collected since could move over an opened seal). Cycle 1 is
     re-split from the stored trading `dates` through the cycle-1 tickets' data cutoff, each
     later cycle is `new_cycle` through its tickets' cutoff; every result must reproduce the
-    sealed period the tickets opened, and its train / valid must equal `train` / `valid`
+    sealed period the tickets opened, and of a cycle in `started` ({cycle: (sealed start,
+    sealed end, data cutoff)}, the logged `lab periods --new-cycle` records, which also
+    cover a cycle without any ticket yet) the sealed period logged for it. The rebuilt
+    train / valid must equal `train` / `valid`
     (ISO [start, end] pairs, e.g. the periods last logged by screen / validate) where given.
     Raises PeriodError when the tickets lack the sealed period / data cutoff, disagree with
     each other, or the rebuilt periods do not match."""
@@ -78,16 +82,20 @@ def rebuild_record(pocket: str, market: str, tickets, dates: pd.DatetimeIndex, f
                               "or data cutoff")
         by_cycle.setdefault(int(t.cycle), set()).add(
             (t.sealed_start, t.sealed_end, t.data_cutoff))
-    if not by_cycle:
-        raise PeriodError("no seal tickets to rebuild from")
+    if 1 not in by_cycle:
+        raise PeriodError("no cycle-1 seal ticket to rebuild from")
+    for cycle, v in (started or {}).items():
+        if int(cycle) >= 2:
+            by_cycle.setdefault(int(cycle), set()).add(tuple(str(x) for x in v))
     if sorted(by_cycle) != list(range(1, max(by_cycle) + 1)):
-        raise PeriodError(f"seal tickets cover cycles {sorted(by_cycle)}, not 1..{max(by_cycle)}")
+        raise PeriodError(f"seal tickets / cycle_started records cover cycles "
+                          f"{sorted(by_cycle)}, not 1..{max(by_cycle)}")
     idx = pd.DatetimeIndex(dates)
     rec = None
     for cycle in sorted(by_cycle):
         if len(by_cycle[cycle]) != 1:
-            raise PeriodError(f"seal tickets of cycle {cycle} disagree on the sealed period / "
-                              f"data cutoff: {sorted(by_cycle[cycle])}")
+            raise PeriodError(f"seal tickets / cycle_started record of cycle {cycle} disagree "
+                              f"on the sealed period / data cutoff: {sorted(by_cycle[cycle])}")
         s0, s1, cutoff = next(iter(by_cycle[cycle]))
         upto = idx[idx <= pd.Timestamp(cutoff)]
         try:
@@ -99,8 +107,8 @@ def rebuild_record(pocket: str, market: str, tickets, dates: pd.DatetimeIndex, f
                rec.data_cutoff.isoformat())
         if got != (s0, s1, cutoff):
             raise PeriodError(f"cycle {cycle}: the stored dates through {cutoff} give sealed "
-                              f"{got[0]}~{got[1]} (cutoff {got[2]}), the tickets opened "
-                              f"{s0}~{s1} (cutoff {cutoff})")
+                              f"{got[0]}~{got[1]} (cutoff {got[2]}), the tickets / "
+                              f"cycle_started record have {s0}~{s1} (cutoff {cutoff})")
     for name, want in (("train", train), ("valid", valid)):
         got = _iso(getattr(rec.periods, name))
         if want is not None and got != [str(want[0]), str(want[1])]:

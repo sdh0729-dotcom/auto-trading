@@ -17,7 +17,7 @@ from tests.fixtures import make_panel
 
 KR_T = replace(load_market_raw("kr"), commission_rate=0.00015)
 SCREEN_COLS = ["rule_id", "params", "n_trades", "mean_net_r", "t_stat", "profit_factor",
-               "win_rate", "sum_net_return"]
+               "win_rate", "sum_net_return", "n_data_end"]
 
 
 @pytest.fixture
@@ -168,3 +168,18 @@ def test_screen_rule_never_sees_bars_after_end(setup, monkeypatch):
     screen_family("spy", p, elig, date(2016, 1, 1), date(2018, 6, 29), cm, log, "swing", "kr",
                   sealed_start=date(2019, 1, 1))
     assert seen == [pd.Timestamp("2018-06-29")] and p.close.index.max() > seen[0]
+
+
+def test_screen_counts_data_end_exits(setup):
+    p, elig, cm, log = setup
+    gone = p.close.index > pd.Timestamp("2017-06-30")
+    for f in (p.open, p.high, p.low, p.close):
+        f.loc[gone, "A"] = np.nan                               # A's prices end mid-period
+    start, end = date(2016, 1, 1), date(2019, 12, 31)
+    df = screen_family("breakout", p, elig, start, end, cm, log, "swing", "kr",
+                       sealed_start=date(2024, 1, 1))
+    for g, n in zip(Breakout.grid(), df["n_data_end"]):
+        t = simulate(p, Breakout(g).signals(p), elig, start, end)
+        assert n == int((t["exit_reason"] == "data_end").sum())
+    assert df["n_data_end"].sum() > 0
+    assert log.rows("swing", "kr")["metrics"].map(lambda m: "n_data_end" in m).all()

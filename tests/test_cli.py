@@ -324,9 +324,12 @@ def test_verify_scenarios_wiring_us(cli_env, monkeypatch):
 
     def fake_nautilus(rule, panel, elig, start, end, cm, pocket, capital, cpk, fractional):
         naut_calls.append((start, end, capital, cpk, fractional, panel.close.index.max()))
-        return pd.DataFrame(columns=["symbol", "entry_date", "entry_price", "exit_date",
-                                     "exit_price", "exit_reason", "stop_pct", "confidence",
-                                     "qty", "net_pnl"])
+        d = panel.close.index[panel.close.index >= pd.Timestamp(start)]
+        px = float(panel.close.at[d[1], "U1"])
+        return pd.DataFrame([{"symbol": "U1", "entry_date": d[1], "entry_price": px,
+                              "exit_date": d[4], "exit_price": px, "exit_reason": "data_end",
+                              "stop_pct": 0.05, "confidence": 1.0, "qty": 1.0,
+                              "net_pnl": -0.01}])
 
     def spy_portfolio(cands, panel, cm, pocket, capital, cpk, fractional, **kw):
         port_calls.append((capital, cpk, fractional, kw))
@@ -346,6 +349,7 @@ def test_verify_scenarios_wiring_us(cli_env, monkeypatch):
         [(50_000, cpk, True)] * 2                     # sealed (parity) + valid per scenario
     assert all(c[3] == timing for c in port_calls)
     assert card.scenarios["real"]["fractional"] is True
+    assert card.scenarios["paper"]["n_data_end"] == 1           # data_end exits counted
     # only one validate row -> sr_var_trials falls back to the squared sealed Sharpe
     assert card.scenarios["paper"]["sr_var_trials_source"] == "sealed_sr_squared"
 

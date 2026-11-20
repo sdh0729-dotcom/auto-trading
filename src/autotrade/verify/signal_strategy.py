@@ -1,8 +1,8 @@
 """NautilusTrader strategy that executes precomputed rule signals on daily data.
 
 The strategy never evaluates rule logic: it reads a long signal frame (one row per window
-trading day x symbol: entry, exit, stop_pct, confidence, gap) and turns it into orders. The
-same strategy is meant to execute live/paper signals later.
+trading day x symbol: entry, exit, stop_pct, confidence, gap, last_bar) and turns it into
+orders. The same strategy is meant to execute live/paper signals later.
 
 Daily event layout (all timestamps are the trading date + local session time, as UTC ns):
 - `open_ns`: one TradeTick per symbol at the day's open. The matching engine fills resting
@@ -13,8 +13,9 @@ Daily event layout (all timestamps are the trading date + local session time, as
   STOP_MARKET sell is placed, so the entry bar is stop-checked from its high/low on.
 - `close_ns`: the daily Bar (1-DAY-LAST-EXTERNAL). Bar execution walks O->H->L->C; a stop
   crossed intrabar fills at its trigger price -> `stop`.
-- `close_ns + 1` alert: exit_at="close" signal, max_hold and period_end sell at market
-  (= the close); otherwise a next_open exit signal is registered as pending.
+- `close_ns + 1` alert: exit_at="close" signal, max_hold, period_end (window's last day) and
+  data_end (`last_bar`: the symbol's last price inside the window) sell at market (= the
+  close); otherwise a next_open exit signal is registered as pending.
 - `close_ns + 2` alert: entry_at="close" entries buy at the close (not on the last day).
 - `close_ns + 3` alert: equity is marked (account cash + positions x close) for the next
   day's risk gates.
@@ -22,6 +23,13 @@ Daily event layout (all timestamps are the trading date + local session time, as
 Portfolio semantics mirror `run_portfolio` on `simulate` candidates: a candidate that sizing
 skips still blocks its symbol until the exit it would have had (tracked as a "phantom" with
 the same exit rules, without orders).
+
+Days without a price for a held symbol (suspension) are held through like in `simulate`: no
+tick/bar arrives, so the resting stop cannot fill, no exit is checked and a pending
+next_open exit stays pending; max_hold keeps counting window days. The resting stop then
+meets the reopening open first (`gap_stop`). The one case the close alerts cannot reach is
+a close entry on the symbol's last bar: it is sold `data_end` (labelled with that day, at
+the book's last close) at the next day's close alert.
 """
 from __future__ import annotations
 
@@ -43,7 +51,8 @@ from autotrade.costs import CostModel
 from autotrade.sizing import RiskState, decide_entry
 from autotrade.types import TRADE_COLUMNS
 
-SIGNAL_COLUMNS = ["date", "symbol", "entry", "exit", "stop_pct", "confidence", "gap"]
+SIGNAL_COLUMNS = ["date", "symbol", "entry", "exit", "stop_pct", "confidence", "gap",
+                  "last_bar"]
 OUTPUT_COLUMNS = TRADE_COLUMNS + ["qty", "net_pnl"]
 DAY_NS = 86_400 * 10**9
 
@@ -143,6 +152,7 @@ class SignalStrategy(Strategy):
                 "stop_pct": g["stop_pct"].to_numpy(dtype=float),
                 "confidence": g["confidence"].to_numpy(dtype=float),
                 "gap": g["gap"].to_numpy(dtype=float),
+                "last_bar": g["last_bar"].eq(True).to_numpy(),
             }
         self._iid = {s: InstrumentId(Symbol(s), self.venue) for s in self.symbols}
         self._pos: dict[str, _Trade] = {}
@@ -215,12 +225,13 @@ class SignalStrategy(Strategy):
             if t.exiting:
                 continue
             bar = self._bar.get(sym)
-            if bar is None or bar[0] != i:          # missing price -> last valid close
+            if bar is None or bar[0] != i:          # no price today: held through ...
                 last_row = bar[0] if bar is not None else t.entry_row
-                if t.live:
-                    self._exit(t, "period_end", last_row)
-                else:
-                    self._close_phantom(t, last_row)
+                if self._sig[sym]["last_bar"][last_row]:   # ... unless prices ended there
+                    if t.live:
+                        self._exit(t, "data_end", last_row)
+                    else:
+                        self._close_phantom(t, last_row)
                 continue
             if not t.live and bar[1] <= t.stop_price:
                 self._close_phantom(t, i)
@@ -233,6 +244,8 @@ class SignalStrategy(Strategy):
                 reason = "max_hold"
             elif last:
                 reason = "period_end"
+            elif sig["last_bar"][i]:
+                reason = "data_end"
             if reason is None:
                 t.pending = self.config.exit_at == "next_open" and bool(sig["exit"][i])
             elif t.live:

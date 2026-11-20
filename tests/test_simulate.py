@@ -219,11 +219,76 @@ def test_signal_before_start_is_ignored():
     assert simulate(p, sigs(p, entries=[0]), all_true(p), date(2024, 1, 2), END).empty
 
 
-def test_nan_price_closes_at_last_valid_close():
-    nan = (np.nan,) * 4
-    p = bars([FLAT, FLAT, FLAT, (100, 102, 99, 101.5), nan, nan, nan, nan])
+NAN = (np.nan,) * 4
+
+
+def test_data_end_closes_at_last_valid_close():
+    # no price again inside the window -> `data_end` at the last valid close (and its date)
+    p = bars([FLAT, FLAT, FLAT, (100, 102, 99, 101.5), NAN, NAN, NAN, NAN])
     t = only(simulate(p, sigs(p, entries=[1]), all_true(p), START, END))
-    assert (t["exit_date"], t["exit_price"], t["exit_reason"]) == (D[3], 101.5, "period_end")
+    assert (t["exit_date"], t["exit_price"], t["exit_reason"]) == (D[3], 101.5, "data_end")
+    # the window ends inside a suspension that resumes later: also data_end
+    p = bars([FLAT, FLAT, FLAT, (100, 102, 99, 101.5), NAN, NAN, FLAT, FLAT])
+    t = only(simulate(p, sigs(p, entries=[1]), all_true(p), START, D[5].date()))
+    assert (t["exit_date"], t["exit_price"], t["exit_reason"]) == (D[3], 101.5, "data_end")
+
+
+def test_suspension_is_held_and_gap_stop_on_reopen():
+    # entry open d2 @100 (stop 95); d3..d5 suspended; d6 reopens at 50 -> gap_stop at 50
+    p = bars([FLAT, FLAT, FLAT, NAN, NAN, NAN, (50, 52, 48, 51)])
+    t = only(simulate(p, sigs(p, entries=[1]), all_true(p), START, END))
+    assert (t["entry_date"], t["exit_date"], t["exit_price"], t["exit_reason"]) == \
+        (D[2], D[6], 50.0, "gap_stop")
+
+
+def test_suspension_then_crash_probe():
+    """Reviewer probe: 10-day suspension, reopen -50% -> gap stop near -50%, not -2.9%."""
+    p = make_panel(120, ["A", "B"], seed=1)
+    for f in (p.open, p.high, p.low, p.close):
+        f.iloc[60:70, 0] = np.nan
+        f.iloc[70:, 0] = f.iloc[70:, 0] * 0.5
+    idx = p.close.index
+    ent = pd.DataFrame(False, index=idx, columns=p.close.columns)
+    ent.iloc[55, 0] = True
+    sig = Signals(ent, ent & False, ent.astype(float) * 0 + 0.05, ent.astype(float) * 0 + 1,
+                  "next_open", "next_open", 20)
+    t = only(simulate(p, sig, all_true(p), idx[0].date(), idx[-1].date()))
+    assert (t["exit_date"], t["exit_reason"]) == (idx[70], "gap_stop")
+    assert t["exit_price"] == pytest.approx(p.open.iloc[70, 0])
+    assert t["exit_price"] / t["entry_price"] - 1 < -0.4
+
+
+def test_max_hold_counts_suspended_rows():
+    # entry d1 = hold row 0, max_hold 3: d2, d3 suspended still count -> exit at d4's close
+    p = bars([FLAT, FLAT, NAN, NAN, (100, 103, 99, 102)])
+    t = only(simulate(p, sigs(p, entries=[0], max_hold=3), all_true(p), START, END))
+    assert (t["exit_date"], t["exit_price"], t["exit_reason"]) == (D[4], 102.0, "max_hold")
+    # max_hold reached during the suspension -> at the close of the first valid row after it
+    p = bars([FLAT, FLAT, NAN, NAN, NAN, (100, 103, 99, 102)])
+    t = only(simulate(p, sigs(p, entries=[0], max_hold=2), all_true(p), START, END))
+    assert (t["exit_date"], t["exit_price"], t["exit_reason"]) == (D[5], 102.0, "max_hold")
+
+
+def test_pending_open_exit_waits_through_suspension():
+    # exit signal d3 -> pending; d4, d5 suspended; sells at d6's open (99)
+    p = bars([FLAT, FLAT, FLAT, FLAT, NAN, NAN, (99, 100, 96, 98)])
+    t = only(simulate(p, sigs(p, entries=[1], exits=[3]), all_true(p), START, END))
+    assert (t["exit_date"], t["exit_price"], t["exit_reason"]) == (D[6], 99.0, "signal")
+
+
+def test_no_exit_checks_on_suspended_rows():
+    # a close-exit signal on a NaN row is ignored; the position is held to the next exit
+    p = bars([FLAT, FLAT, FLAT, NAN, FLAT, (100, 104, 99, 103)])
+    s = sigs(p, entries=[1], exits=[3, 5], exit_at="close")
+    t = only(simulate(p, s, all_true(p), START, END))
+    assert (t["exit_date"], t["exit_price"], t["exit_reason"]) == (D[5], 103.0, "signal")
+
+
+def test_close_entry_followed_by_data_end_is_zero_length():
+    p = bars([FLAT, FLAT, FLAT, NAN, NAN, NAN, NAN, NAN])
+    s = sigs(p, entries=[2], entry_at="close", exit_at="close")
+    t = only(simulate(p, s, all_true(p), START, END))
+    assert (t["entry_date"], t["exit_date"], t["exit_reason"]) == (D[2], D[2], "data_end")
 
 
 def test_nan_entry_price_means_no_trade():
@@ -243,7 +308,8 @@ def test_multiple_symbols_and_empty_frame_dtypes():
     s = Breakout({"n": 20, "m": 10, "k": 2.0}).signals(p)
     t = simulate(p, s, all_true(p), date(2016, 1, 1), date(2017, 12, 31))
     assert set(t["symbol"]) <= {"A", "B", "C"} and len(t) > 0
-    assert set(t["exit_reason"]) <= {"signal", "stop", "gap_stop", "max_hold", "period_end"}
+    assert set(t["exit_reason"]) <= {"signal", "stop", "gap_stop", "max_hold", "period_end",
+                                     "data_end"}
     assert (t["exit_date"] >= t["entry_date"]).all()
     assert t["entry_date"].is_monotonic_increasing
     none = simulate(p, s, all_true(p) & False, date(2016, 1, 1), date(2017, 12, 31))

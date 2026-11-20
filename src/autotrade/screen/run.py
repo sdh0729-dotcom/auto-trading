@@ -18,11 +18,12 @@ from autotrade.validate.seal import SealViolation
 MIN_TRAIN_TRADES = 30
 
 SCREEN_COLUMNS = ["rule_id", "params", "n_trades", "mean_net_r", "t_stat", "profit_factor",
-                  "win_rate", "sum_net_return"]
+                  "win_rate", "sum_net_return", "n_data_end"]
 
 
 def trade_metrics(net: pd.DataFrame) -> dict:
-    """Summary of CostModel.net_returns output (net_return, net_r per trade)."""
+    """Summary of CostModel.net_returns output (net_return, net_r per trade). `n_data_end`
+    counts trades closed because the symbol's prices ended inside the window."""
     n = len(net)
     r = net["net_r"].astype(float)
     ret = net["net_return"].astype(float)
@@ -36,7 +37,8 @@ def trade_metrics(net: pd.DataFrame) -> dict:
         pf = math.inf if gain > 0 else math.nan
     return {"n_trades": n, "mean_net_r": mean_r, "t_stat": t_stat, "profit_factor": pf,
             "win_rate": float((ret > 0).mean()) if n else math.nan,
-            "sum_net_return": float(ret.sum())}
+            "sum_net_return": float(ret.sum()),
+            "n_data_end": int((net["exit_reason"] == "data_end").sum()) if n else 0}
 
 
 def screen_family(family: str, panel: Panel, eligible: pd.DataFrame, start: date, end: date,

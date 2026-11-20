@@ -278,3 +278,23 @@ def test_empty_candidates():
     assert res.fills.empty and res.skipped.empty and res.equity.empty
     assert list(res.fills.columns) == TRADE_COLUMNS + ["qty", "net_pnl", "net_r"]
     assert list(res.skipped.columns) == TRADE_COLUMNS + ["reason"]
+
+
+def test_suspension_marks_last_valid_close_until_reopen_gap_stop():
+    # A held through rows 2..4 without prices: equity carries the row-1 close (110), then the
+    # simulator's gap_stop at the reopening open (50) on row 5 realises the loss
+    a = [100.0, 110.0, np.nan, np.nan, np.nan, 50.0] + [50.0] * 24
+    res = run([cand("A", 0, 5, stop=0.05, exit_price=50.0, reason="gap_stop")],
+              panel({"A": a}))
+    eq = res.equity
+    assert eq.iloc[2] == eq.iloc[3] == eq.iloc[4] == pytest.approx(eq.iloc[1])
+    assert eq.iloc[5] == pytest.approx(1_000_000 + res.fills["net_pnl"].iloc[0])
+    assert res.fills["net_pnl"].iloc[0] < 0
+
+
+def test_close_entry_with_same_day_data_end_is_closed():
+    pocket = replace(POCKET, max_positions=1)
+    p = panel({"A": 100.0, "B": 100.0})
+    res = run([cand("A", 3, 3, reason="data_end"), cand("B", 5, 8)], p, pocket=pocket,
+              entry_at="close", exit_at="close")
+    assert set(res.fills["symbol"]) == {"A", "B"} and res.skipped.empty

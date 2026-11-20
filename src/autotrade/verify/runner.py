@@ -20,9 +20,11 @@ Known, documented differences to the simulator (`parity_report` lists any that o
 - Fractional US quantities are floored to 6 decimals. Nautilus' `Equity` fixes size
   precision 0, so fractional instruments are plain `Instrument`s with AssetClass.EQUITY.
 - Bars carry a very large volume: like the simulator, fills are never liquidity-capped.
-- A position whose symbol has no price on a day closes `period_end` labelled with the last
-  valid date, but Nautilus can only sell it (at that last close) on the missing day, so the
-  cash arrives one day later than in `run_portfolio`.
+- Suspended days (no price) are held through in both engines; prices that end inside the
+  window close `data_end` at the last valid close on that day. Only a close entry on the
+  symbol's very last bar (a zero-length `data_end` trade) is sold by Nautilus on the next
+  window day (at that last close), so its cash arrives one day later than in
+  `run_portfolio`.
 """
 from __future__ import annotations
 
@@ -67,7 +69,8 @@ def signal_frame(panel: Panel, signals, eligible: pd.DataFrame, start: date,
                  end: date) -> pd.DataFrame:
     """Long frame (SIGNAL_COLUMNS), one row per window day x symbol. `entry` already
     requires eligibility and a valid stop on the signal row; `gap` is the sizing gap
-    allowance as of the entry's fill date (NaN where there is no fillable entry)."""
+    allowance as of the entry's fill date (NaN where there is no fillable entry);
+    `last_bar` marks the symbol's last row with a full OHLC price inside the window."""
     idx, cols = panel.close.index, panel.close.columns
     win = idx[(idx >= pd.Timestamp(start)) & (idx <= pd.Timestamp(end))]
 
@@ -80,13 +83,17 @@ def signal_frame(panel: Panel, signals, eligible: pd.DataFrame, start: date,
     stop, conf = num(signals.stop_pct), num(signals.confidence)
     with np.errstate(invalid="ignore"):
         entry = flag(signals.entries) & flag(eligible) & np.isfinite(stop) & (stop > 0)
+    ohlc = [num(f).to_numpy() for f in (panel.open, panel.high, panel.low, panel.close)]
+    valid = np.logical_and.reduce([np.isfinite(x) for x in ohlc])
+    later = np.flip(np.cumsum(np.flip(valid, axis=0), axis=0), axis=0) - valid
+    last_bar = pd.DataFrame(valid & (later == 0), index=win, columns=cols)
     gap = pd.DataFrame(np.nan, index=win, columns=cols)
     shift = 1 if signals.entry_at == "next_open" else 0
     for r, c in zip(*np.nonzero(entry.to_numpy())):
         if r + shift < len(win):
             gap.iat[r, c] = gap_allowance(panel, cols[c], win[r + shift])
     parts = {"entry": entry, "exit": flag(signals.exits), "stop_pct": stop,
-             "confidence": conf, "gap": gap}
+             "confidence": conf, "gap": gap, "last_bar": last_bar}
     long = pd.concat({k: v.stack(future_stack=True) for k, v in parts.items()}, axis=1)
     long.index.names = ["date", "symbol"]
     return long.reset_index()[SIGNAL_COLUMNS]

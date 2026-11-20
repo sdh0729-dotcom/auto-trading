@@ -15,8 +15,12 @@ Fill rules (brief, Task 9):
   at close.
 - A `next_open` entry bar is checked from (2) on. A `close` entry bar is not price-checked;
   only an exit_at="next_open" signal on it is registered (fills at the next open).
-- Still open on the last row of the window -> `period_end` at that close. A bar with a
-  missing price while open -> `period_end` at the last valid close (and its date).
+- Rows with a missing price (suspension, no data) while open are held through: no stop or
+  exit checks and no new exit signals on them, a pending next_open exit stays pending, and
+  they still count towards max_hold (rows of the panel calendar). The next valid row applies
+  the normal order above (gap check at its open first).
+- Still open on the last row of the window -> `period_end` at that close. Prices never
+  resume inside the window -> `data_end` at the last valid close (and its date).
 """
 from __future__ import annotations
 
@@ -96,8 +100,9 @@ def _hold(col, e: int, price: float, stop: float, next_open_entry: bool,
     else:
         r = e
     while r < n:
-        if not valid[r]:
-            return last_row, last_close, "period_end"
+        if not valid[r]:                                         # held through, no checks
+            r += 1
+            continue
         if r > e and o[r] <= stop:                               # (1) not on entry bar
             return r, o[r], "gap_stop"
         # Physical order: a pending next_open exit sells at this bar's open (after the gap
@@ -113,7 +118,7 @@ def _hold(col, e: int, price: float, stop: float, next_open_entry: bool,
         pending = next_open_exit and exits[r]
         last_row, last_close = r, c[r]
         r += 1
-    return last_row, last_close, "period_end"
+    return last_row, last_close, "period_end" if last_row == n - 1 else "data_end"
 
 
 def _frame(trades: list[tuple]) -> pd.DataFrame:

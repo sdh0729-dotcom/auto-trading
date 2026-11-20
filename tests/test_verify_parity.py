@@ -161,13 +161,13 @@ def test_kr_integer_prices_trade_on_the_won_grid():
     assert {m["field"] for m in rep["mismatches"]} <= {"exit_price", "net_pnl"}
 
 
-def test_missing_price_closes_period_end_at_last_valid_close():
+def test_data_end_closes_at_last_valid_close():
     p = flat_panel(["A", "B"])
     for f in (p.open, p.high, p.low, p.close):
-        f.iloc[8:12, 0] = np.nan                               # A has no prices rows 8..11
+        f.iloc[8:, 0] = np.nan                                 # A: no prices from row 8 on
     p.close.iloc[7, 0] = 10_100.0
     p.high.iloc[7, 0] = 10_100.0
-    rule = FixedRule(entries={"A": [3, 14], "B": [3]}, exits={"A": [20], "B": [6]},
+    rule = FixedRule(entries={"A": [3], "B": [3]}, exits={"A": [20], "B": [6]},
                      conf={"A": 0.9, "B": 0.5})
     elig = all_true_mask(p)
     s, e = p.close.index[0].date(), p.close.index[-1].date()
@@ -175,12 +175,58 @@ def test_missing_price_closes_period_end_at_last_valid_close():
                          5_000_000, 1.0, False, **timing(rule, p)).fills
     naut = run_nautilus(rule, p, elig, s, e, CM, SWING, 5_000_000, 1.0, False)
     d = p.close.index
-    a = naut[naut["symbol"] == "A"]
-    assert list(zip(a["entry_date"], a["exit_date"], a["exit_reason"])) == [
-        (d[3], d[7], "period_end"), (d[14], d[20], "signal")]
-    assert a["exit_price"].iloc[0] == 10_100.0
+    for df in (ours, naut):
+        a = df[df["symbol"] == "A"]
+        assert list(zip(a["entry_date"], a["exit_date"], a["exit_reason"])) == [
+            (d[3], d[7], "data_end")]
+        assert a["exit_price"].iloc[0] == 10_100.0
     rep = parity_report(ours, naut)
     assert rep["matched_share"] == 1.0 and rep["mismatches"] == []
+    # cash comes back on the last valid day in both engines
+    assert naut.attrs["final_balance"] == pytest.approx(5_000_000 + naut["net_pnl"].sum(),
+                                                       abs=len(naut))
+
+
+@pytest.mark.parametrize("entry_at,exit_at", [("close", "close"), ("next_open", "next_open")])
+def test_suspension_then_crash_is_held_and_gap_stopped(entry_at, exit_at):
+    """A is suspended rows 8..17 and reopens 50% lower: both engines hold through the gap
+    and stop out at the reopening open (not at the last pre-suspension close)."""
+    p = flat_panel(["A", "B"])
+    for f in (p.open, p.high, p.low, p.close):
+        f.iloc[8:18, 0] = np.nan
+        f.iloc[18:, 0] = 5_000.0
+    rule = FixedRule(entries={"A": [3], "B": [3]}, exits={"A": [25], "B": [6]},
+                     conf={"A": 0.9, "B": 0.5}, entry_at=entry_at, exit_at=exit_at)
+    elig = all_true_mask(p)
+    s, e = p.close.index[0].date(), p.close.index[-1].date()
+    ours = run_portfolio(simulate(p, rule.signals(p), elig, s, e), p, CM, SWING,
+                         5_000_000, 1.0, False, **timing(rule, p)).fills
+    naut = run_nautilus(rule, p, elig, s, e, CM, SWING, 5_000_000, 1.0, False)
+    d = p.close.index
+    for df in (ours, naut):
+        a = df[df["symbol"] == "A"].iloc[0]
+        assert (a["exit_date"], a["exit_reason"], a["exit_price"]) == (d[18], "gap_stop", 5_000.0)
+        assert a["net_pnl"] < 0
+    rep = parity_report(ours, naut)
+    assert rep["matched_share"] == 1.0 and rep["exit_reason_agreement"] == 1.0
+    assert rep["mismatches"] == []
+
+
+def test_max_hold_counts_suspended_rows_in_both_engines():
+    p = flat_panel(["A", "B"])
+    for f in (p.open, p.high, p.low, p.close):
+        f.iloc[6:9, 0] = np.nan                                # A suspended rows 6..8
+    rule = FixedRule(entries={"A": [3]}, exits={}, conf={"A": 0.9, "B": 0.5}, max_hold=4)
+    elig = all_true_mask(p)
+    s, e = p.close.index[0].date(), p.close.index[-1].date()
+    ours = run_portfolio(simulate(p, rule.signals(p), elig, s, e), p, CM, SWING,
+                         5_000_000, 1.0, False, **timing(rule, p)).fills
+    naut = run_nautilus(rule, p, elig, s, e, CM, SWING, 5_000_000, 1.0, False)
+    d = p.close.index
+    for df in (ours, naut):          # close entry row 3; row 7 (= 4 rows) is NaN -> row 9
+        assert list(zip(df["entry_date"], df["exit_date"], df["exit_reason"])) == [
+            (d[3], d[9], "max_hold")]
+    assert parity_report(ours, naut)["mismatches"] == []
 
 
 def test_parity_breakout_with_binding_max_positions():
@@ -204,7 +250,7 @@ def test_parity_breakout_with_binding_max_positions():
 def test_close_entry_followed_by_missing_bar():
     p = flat_panel(["A", "B"])
     for f in (p.open, p.high, p.low, p.close):
-        f.iloc[4:8, 0] = np.nan                                # A: no prices rows 4..7
+        f.iloc[4:, 0] = np.nan                                 # A: no prices from row 4 on
     one_slot = replace(SWING, max_positions=1)
     rule = FixedRule(entries={"A": [3], "B": [10]}, exits={"A": [20], "B": [15]},
                      conf={"A": 0.9, "B": 0.5})
@@ -214,7 +260,7 @@ def test_close_entry_followed_by_missing_bar():
                          5_000_000, 1.0, False, **timing(rule, p)).fills
     naut = run_nautilus(rule, p, elig, s, e, CM, one_slot, 5_000_000, 1.0, False)
     d = p.close.index
-    expected = [("A", d[3], d[3], "period_end"), ("B", d[10], d[15], "signal")]
+    expected = [("A", d[3], d[3], "data_end"), ("B", d[10], d[15], "signal")]
     for df in (ours, naut):
         assert list(zip(df["symbol"], df["entry_date"], df["exit_date"],
                         df["exit_reason"])) == expected

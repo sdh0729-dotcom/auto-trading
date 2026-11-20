@@ -2,11 +2,11 @@
 
 Per date, events are applied in physical time order: (a) exits filled at the open (gap_stop;
 signal when exit_at="next_open"), (b) entry_at="next_open" entries, (c) intraday `stop` exits,
-(d) exits at the close (signal when exit_at="close", max_hold, period_end), (e)
-entry_at="close" entries (a close exit dated its own close-entry day, i.e. the next bar is
-missing, is applied right after them); entries go in confidence-descending order and only
-see the cash and slots freed before them. Then equity is marked to the close (NaN close
-carries the last valid one). Sizing equity is the equity marked at the previous trading day's close (initial
+(d) exits at the close (signal when exit_at="close", max_hold, period_end, data_end), (e)
+entry_at="close" entries (a close exit dated its own close-entry day, i.e. a `data_end` on
+the symbol's last bar, is applied right after them); entries go in confidence-descending
+order and only see the cash and slots freed before them. Then equity is marked to the close
+(a NaN close, e.g. a suspension the simulator holds through, carries the last valid one). Sizing equity is the equity marked at the previous trading day's close (initial
 capital on the first day). Skip-reason precedence: drawdown_stop, daily_loss_stop,
 max_positions, too_small, cash.
 """
@@ -180,7 +180,7 @@ def run_portfolio(candidates: pd.DataFrame, panel: Panel, cost_model: CostModel,
         do_exits(d, "close")
         if entry_phase == "close":
             do_entries(d)
-            # zero-length trades (close entry whose next bar is missing -> period_end dated
+            # zero-length trades (close entry on the symbol's last bar -> data_end dated
             # the entry day) close right after their entry
             do_exits(d, "close")
 

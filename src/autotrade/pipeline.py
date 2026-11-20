@@ -511,6 +511,7 @@ def _final_scenarios(rule, panel: Panel, s: Setup, pbo: float, n_trials: int,
             "fractional": frac, "passed": v.passed, "failed": list(v.failed),
             "sr_var_trials_source": var_src,
             "mean_cost_r": float(np.mean(cost_r)) if cost_r else math.nan,
+            "n_data_end": int((naut["exit_reason"] == "data_end").sum()),
             "valid_n_trades": int(len(valid_res.fills)),
             "metrics": v.metrics,
         }

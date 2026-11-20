@@ -94,7 +94,7 @@ def screen(pocket: str = typer.Option("swing"), market: str = typer.Option(..., 
     """Screen rule families on the train period (fixed amount)."""
     df = pipeline.screen(pocket, market, family)
     _show(df[["rule_id", "n_trades", "mean_net_r", "t_stat", "profit_factor", "win_rate",
-              "sum_net_return", "params"]])
+              "sum_net_return", "n_data_end", "params"]])
 
 
 @app.command()

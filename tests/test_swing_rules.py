@@ -125,3 +125,62 @@ def test_breakout_exit_fires_on_break_below_prior_m_day_low():
     s20 = SWING_FAMILIES["breakout"]({"n": 20, "m": 20, "k": 2}).signals(p)
     assert s5.exits["A"].tolist() == [i == 50 for i in range(100)]
     assert not s20.exits["A"].any()   # prior 20-day low is 90 -> 95 is not below it
+
+
+# --- I4: momentum / reversal rank within the day's universe ---------------------------------
+import numpy as np  # noqa: E402
+
+from autotrade.config import load_lab, load_market_raw, load_pocket  # noqa: E402
+from autotrade.universe import eligible_mask  # noqa: E402
+
+
+def test_momentum_ranks_only_eligible_symbols():
+    p = make_panel(300, ["A", "B", "C", "D"], seed=8)
+    p.close.iloc[:, 0] = 100 * np.exp(np.linspace(0, 3, 300))     # A: by far the best return
+    rule = SWING_FAMILIES["momentum"]({"lookback": 21, "rebalance": 10, "top_k": 1, "k": 2})
+    assert rule.signals(p).entries["A"].iloc[30::10].all()
+    elig = pd.DataFrame(True, index=p.close.index, columns=p.close.columns)
+    elig["A"] = False                                              # A outside the universe
+    s = rule.signals(p, eligible=elig)
+    assert not s.entries["A"].any()
+    assert (s.entries.iloc[30::10].sum(axis=1) == 1).all()         # next best takes rank 1
+    assert (s.confidence.to_numpy()[s.entries.to_numpy()] == 1.0).all()
+
+
+def test_reversal_ranks_only_eligible_symbols():
+    p = make_panel(100, ["A", "B", "C"], seed=2)
+    p.close.iloc[60:, 0] *= 0.5                                    # A: biggest loser at 60
+    rule = SWING_FAMILIES["reversal"]({"lookback": 5, "top_k": 1, "hold": 5, "k": 2})
+    elig = pd.DataFrame(True, index=p.close.index, columns=p.close.columns)
+    elig.iloc[60, 0] = False
+    s = rule.signals(p, eligible=elig)
+    assert not s.entries["A"].iloc[60]
+    loss = -(p.close.iloc[60] / p.close.iloc[55] - 1)
+    others = loss.drop("A")
+    if (others > 0).any():
+        assert s.entries.iloc[60].sum() == 1 and s.entries.iloc[60][others.idxmax()]
+
+
+@pytest.mark.parametrize("family", sorted(set(SWING_FAMILIES) - {"momentum", "reversal"}))
+def test_other_families_ignore_eligible(family):
+    p = make_panel(300, ["A", "B", "C"], seed=5, products={s: "etf" for s in "ABC"})
+    rule = SWING_FAMILIES[family](SWING_FAMILIES[family].grid()[0])
+    elig = pd.DataFrame(np.random.default_rng(0).random(p.close.shape) > 0.5,
+                        index=p.close.index, columns=p.close.columns)
+    a, b = rule.signals(p), rule.signals(p, eligible=elig)
+    pd.testing.assert_frame_equal(a.entries, b.entries)
+    pd.testing.assert_frame_equal(a.exits, b.exits)
+
+
+@pytest.mark.parametrize("family", ["momentum", "reversal"])
+def test_ranking_with_universe_ignores_future(family):
+    p = make_panel(400, [f"S{i}" for i in range(6)], seed=4)
+    lab = load_lab()
+    rule = SWING_FAMILIES[family](SWING_FAMILIES[family].grid()[0])
+    mc, pc = load_market_raw("us"), load_pocket("swing")
+    s1 = rule.signals(p, eligible=eligible_mask(p, mc, pc, lab, "paper", 1400.0))
+    for f in (p.close, p.high, p.volume):
+        f.iloc[300:] *= 3
+    s2 = rule.signals(p, eligible=eligible_mask(p, mc, pc, lab, "paper", 1400.0))
+    pd.testing.assert_frame_equal(s1.entries.iloc[:300], s2.entries.iloc[:300])
+    pd.testing.assert_frame_equal(s1.exits.iloc[:300], s2.exits.iloc[:300])

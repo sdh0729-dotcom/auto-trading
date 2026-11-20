@@ -46,7 +46,7 @@ class KronosDaily(BaseRule):
         return [{"horizon": h, "threshold": t, "k": k}
                 for h, t, k in itertools.product(HORIZON, THRESHOLD, K)]
 
-    def signals(self, panel: Panel) -> Signals:
+    def signals(self, panel: Panel, eligible: pd.DataFrame | None = None) -> Signals:
         horizon, threshold, k = (self.params[x] for x in self.PARAM_KEYS)
         entries = pd.DataFrame(False, index=panel.close.index, columns=panel.close.columns)
         conf = pd.DataFrame(np.nan, index=panel.close.index, columns=panel.close.columns)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import itertools
 
+import pandas as pd
+
 from autotrade.rules.base import BaseRule, atr_stop, finalize
 from autotrade.rules.indicators import rsi, sma
 from autotrade.types import Panel, Signals
@@ -19,7 +21,7 @@ class Oversold(BaseRule):
     def grid(cls):
         return [{"x": x, "k": k} for x, k in itertools.product(X, K)]
 
-    def signals(self, panel: Panel) -> Signals:
+    def signals(self, panel: Panel, eligible: pd.DataFrame | None = None) -> Signals:
         x, k = self.params["x"], self.params["k"]
         c = panel.close
         r2 = rsi(c, 2)

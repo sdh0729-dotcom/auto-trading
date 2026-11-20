@@ -160,9 +160,9 @@ def test_screen_rule_never_sees_bars_after_end(setup, monkeypatch):
         def grid(cls):
             return [{"n": 20, "m": 5, "k": 2.0}]
 
-        def signals(self, panel):
+        def signals(self, panel, eligible=None):
             seen.append(panel.close.index.max())
-            return super().signals(panel)
+            return super().signals(panel, eligible=eligible)
 
     monkeypatch.setitem(__import__("autotrade.screen.run", fromlist=["x"]).SWING_FAMILIES, "spy", Spy)
     screen_family("spy", p, elig, date(2016, 1, 1), date(2018, 6, 29), cm, log, "swing", "kr",
@@ -183,3 +183,18 @@ def test_screen_counts_data_end_exits(setup):
         assert n == int((t["exit_reason"] == "data_end").sum())
     assert df["n_data_end"].sum() > 0
     assert log.rows("swing", "kr")["metrics"].map(lambda m: "n_data_end" in m).all()
+
+
+def test_screen_passes_the_eligibility_mask_to_signals(setup, monkeypatch):
+    p, elig, cm, log = setup
+    seen = []
+    real = Breakout.signals
+
+    def spy(self, panel, eligible=None):
+        seen.append(eligible)
+        return real(self, panel, eligible=eligible)
+    monkeypatch.setattr(Breakout, "signals", spy)
+    end = date(2018, 6, 29)
+    screen_family("breakout", p, elig, date(2016, 1, 1), end, cm, log, "swing", "kr",
+                  sealed_start=date(2019, 1, 1))
+    assert seen and all(e is not None and e.index.max() == pd.Timestamp(end) for e in seen)

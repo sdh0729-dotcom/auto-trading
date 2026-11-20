@@ -78,7 +78,8 @@ class FixedRule:
         self.e, self.x, self.c = entries, exits, conf
         self.entry_at, self.exit_at, self.max_hold = entry_at, exit_at, max_hold
 
-    def signals(self, panel: Panel) -> Signals:
+    def signals(self, panel: Panel, eligible=None) -> Signals:
+        self.seen_eligible = eligible
         idx, cols = panel.close.index, panel.close.columns
         ent = pd.DataFrame(False, index=idx, columns=cols)
         ext = pd.DataFrame(False, index=idx, columns=cols)
@@ -266,3 +267,15 @@ def test_close_entry_followed_by_missing_bar():
                         df["exit_reason"])) == expected
     rep = parity_report(ours, naut)
     assert rep["matched_share"] == 1.0 and rep["mismatches"] == []
+
+
+def test_run_nautilus_passes_the_eligibility_mask_to_signals():
+    p = flat_panel(["A", "B"])
+    rule = FixedRule(entries={"A": [3]}, exits={"A": [6]}, conf={"A": 0.9, "B": 0.5})
+    elig = all_true_mask(p)
+    elig.iloc[10:, 1] = False
+    e = p.close.index[15].date()
+    run_nautilus(rule, p, elig, p.close.index[0].date(), e, CM, SWING, 5_000_000, 1.0, False)
+    got = rule.seen_eligible
+    assert got is not None and got.index.equals(p.close.index[:16])
+    pd.testing.assert_frame_equal(got, elig.iloc[:16])

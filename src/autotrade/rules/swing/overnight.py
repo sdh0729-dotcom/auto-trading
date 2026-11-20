@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+import pandas as pd
+
 from autotrade.rules.base import BaseRule
 from autotrade.types import Panel, Signals
 
@@ -19,7 +21,7 @@ class Overnight(BaseRule):
     def grid(cls):
         return [{}]
 
-    def signals(self, panel: Panel) -> Signals:
+    def signals(self, panel: Panel, eligible: pd.DataFrame | None = None) -> Signals:
         c = panel.close
         etf = (panel.meta["product"].reindex(c.columns) == "etf").to_numpy()
         mask = np.broadcast_to(etf, c.shape)

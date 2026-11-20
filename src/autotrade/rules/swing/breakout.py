@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import itertools
 
+import pandas as pd
+
 from autotrade.rules.base import BaseRule, atr_stop, finalize
 from autotrade.rules.indicators import atr, rolling_high, rolling_low
 from autotrade.types import Panel, Signals
@@ -20,7 +22,7 @@ class Breakout(BaseRule):
     def grid(cls):
         return [{"n": n, "m": m, "k": k} for n, m, k in itertools.product(N, M, K)]
 
-    def signals(self, panel: Panel) -> Signals:
+    def signals(self, panel: Panel, eligible: pd.DataFrame | None = None) -> Signals:
         n, m, k = (self.params[x] for x in self.PARAM_KEYS)
         prev_high = rolling_high(panel.high, n).shift(1)
         entries = panel.close > prev_high

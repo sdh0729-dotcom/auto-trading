@@ -14,7 +14,10 @@ class Rule(Protocol):
     family: ClassVar[str]
     params: dict
 
-    def signals(self, panel: Panel) -> Signals: ...
+    def signals(self, panel: Panel, eligible: pd.DataFrame | None = None) -> Signals:
+        """`eligible`: the point-in-time universe mask (date x symbol, from data through t-1).
+        Cross-sectional families rank only within it; the others ignore it."""
+        ...
 
     @classmethod
     def grid(cls) -> list[dict]: ...
@@ -41,6 +44,13 @@ class BaseRule:
     @classmethod
     def grid(cls) -> list[dict]:
         raise NotImplementedError
+
+
+def in_universe(eligible: pd.DataFrame | None, like: pd.DataFrame) -> pd.DataFrame:
+    """Bool mask aligned to `like`: the eligibility mask, or all True without one."""
+    if eligible is None:
+        return pd.DataFrame(True, index=like.index, columns=like.columns)
+    return eligible.reindex(index=like.index, columns=like.columns).eq(True)
 
 
 def atr_stop(panel: Panel, k: float) -> pd.DataFrame:

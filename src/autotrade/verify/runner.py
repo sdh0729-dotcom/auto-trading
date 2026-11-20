@@ -1,7 +1,7 @@
 """Independent re-execution of a rule's signals in NautilusTrader + parity report.
 
-`run_nautilus` computes `rule.signals` on the panel history through `end` (warm-up
-included), keeps entries whose signal row lies in [start, end] and is eligible, and lets
+`run_nautilus` computes `rule.signals` (with the eligibility mask) on the panel history
+through `end` (warm-up included), keeps entries whose signal row lies in [start, end] and is eligible, and lets
 `SignalStrategy` execute them on a BacktestEngine: one cash-account venue per market (KRW /
 USD), one equity instrument per symbol, per day an open-price TradeTick followed by the
 daily bar (see `signal_strategy` for the event layout and why). The venue runs with
@@ -151,7 +151,8 @@ def run_nautilus(rule: Rule, panel: Panel, eligible: pd.DataFrame, start: date, 
     """Trades (TRADE_COLUMNS + qty, net_pnl) of `rule` executed by SignalStrategy in
     NautilusTrader; `attrs["final_balance"]` is the venue account's final cash."""
     hist = panel.slice(panel.close.index[0], end)
-    signals = rule.signals(hist)
+    elig = eligible.reindex(index=hist.close.index, columns=hist.close.columns).eq(True)
+    signals = rule.signals(hist, eligible=elig)
     frame = signal_frame(hist, signals, eligible, start, end)
     if frame.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)

@@ -452,7 +452,7 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     for fam, params, rid, scr_r in zip(cands["family"], cands["params"], cands["rule_id"],
                                        cands["mean_net_r"]):
         rule = _rule(fams, fam, params, rid)
-        sig = rule.signals(panel)                 # history through the valid end
+        sig = rule.signals(panel, eligible=elig)  # history through the valid end
         seg_sums = []
         for a, b in segments:                     # params fixed; valid period only
             trades = simulate(panel, sig, elig, a, b)
@@ -560,21 +560,21 @@ def _final_scenarios(rule, panel: Panel, s: Setup, pbo: float, n_trials: int,
     cpk = _currency_per_krw(s.market, s.synced)
     cal = panel.close.index
     first = cal[0]
-    sig = rule.signals(panel)                                # history through sealed end
     vpanel = panel.slice(first, v1)
-    vsig = rule.signals(vpanel)                              # history through valid end
     scenarios, parity = {}, {}
     for scen in SCENARIOS:
         capital = s.lab.capital[scen]
         cap0 = capital * cpk
         frac = s.market.fractional_orders if scen == "real" else False
         elig = eligible_mask(panel, s.market, s.pocket, s.lab, scen, s.synced.usd_krw)
+        velig = elig.loc[elig.index <= pd.Timestamp(v1)]
+        sig = rule.signals(panel, eligible=elig)             # history through sealed end
+        vsig = rule.signals(vpanel, eligible=velig)          # history through valid end
         naut = run_nautilus(rule, panel, elig, s0, s1, cm, s.pocket, capital, cpk, frac)
         ours = run_portfolio(simulate(panel, sig, elig, s0, s1), panel, cm, s.pocket, capital,
                              cpk, frac, entry_at=sig.entry_at, exit_at=sig.exit_at)
         parity[scen] = _parity_summary(parity_report(ours.fills, naut))
         sealed_res = nautilus_result(naut, panel, cm, cap0, s0, s1)
-        velig = elig.loc[elig.index <= pd.Timestamp(v1)]
         valid_res = run_portfolio(simulate(vpanel, vsig, velig, v0, v1), vpanel, cm, s.pocket,
                                   capital, cpk, frac, entry_at=vsig.entry_at,
                                   exit_at=vsig.exit_at)

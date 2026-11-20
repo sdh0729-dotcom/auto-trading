@@ -25,7 +25,7 @@ class Tom(BaseRule):
     def grid(cls):
         return [{"n": n, "m": m, "k": k} for n, m, k in itertools.product(N, M, K)]
 
-    def signals(self, panel: Panel) -> Signals:
+    def signals(self, panel: Panel, eligible: pd.DataFrame | None = None) -> Signals:
         n, m, k = (self.params[x] for x in self.PARAM_KEYS)
         c = panel.close
         months = np.asarray(c.index.to_period("M").astype(str))

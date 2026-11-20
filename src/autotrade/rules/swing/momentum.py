@@ -4,7 +4,9 @@ import itertools
 
 import numpy as np
 
-from autotrade.rules.base import BaseRule, atr_stop, finalize
+import pandas as pd
+
+from autotrade.rules.base import BaseRule, atr_stop, finalize, in_universe
 from autotrade.types import Panel, Signals
 
 LOOKBACK = [21, 63]
@@ -14,7 +16,8 @@ K = [2.0]
 
 
 class Momentum(BaseRule):
-    """Every `rebalance`-th row: enter top-k by lookback return; exit everything outside top-k.
+    """Every `rebalance`-th row: enter top-k by lookback return among the day's universe
+    (`eligible`, all symbols without it); exit everything outside top-k.
 
     max_hold_days = rebalance. Rebalance rows are positional (i % rebalance == 0).
     """
@@ -26,10 +29,10 @@ class Momentum(BaseRule):
         return [{"lookback": lb, "rebalance": rb, "top_k": tk, "k": k}
                 for lb, rb, tk, k in itertools.product(LOOKBACK, REBALANCE, TOP_K, K)]
 
-    def signals(self, panel: Panel) -> Signals:
+    def signals(self, panel: Panel, eligible: pd.DataFrame | None = None) -> Signals:
         lb, rb, tk, k = (self.params[x] for x in self.PARAM_KEYS)
         c = panel.close
-        ret = c / c.shift(lb) - 1
+        ret = (c / c.shift(lb) - 1).where(in_universe(eligible, c))
         rank = ret.rank(axis=1, ascending=False, method="first")
         is_reb = np.arange(len(c)) % rb == 0
         reb = c.copy().astype(bool)

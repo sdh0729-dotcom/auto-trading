@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import itertools
 
+import pandas as pd
+
 from autotrade.rules.base import BaseRule, atr_stop, finalize
 from autotrade.rules.indicators import sma
 from autotrade.types import Panel, Signals
@@ -21,7 +23,7 @@ class MaTrend(BaseRule):
     def grid(cls):
         return [{"s": s, "l": l, "k": k} for s, l, k in itertools.product(S, L, K) if s < l]
 
-    def signals(self, panel: Panel) -> Signals:
+    def signals(self, panel: Panel, eligible: pd.DataFrame | None = None) -> Signals:
         s, l, k = (self.params[x] for x in self.PARAM_KEYS)
         c = panel.close
         sma_s, sma_l = sma(c, s), sma(c, l)

@@ -58,7 +58,7 @@ def screen_family(family: str, panel: Panel, eligible: pd.DataFrame, start: date
     out = []
     for params in cls.grid():
         rule = cls(params)
-        trades = simulate(visible, rule.signals(visible), elig, start, end)
+        trades = simulate(visible, rule.signals(visible, eligible=elig), elig, start, end)
         metrics = trade_metrics(cost_model.net_returns(trades))
         log.record(pocket, market, family, rule.rule_id, params, "screen", period, metrics)
         out.append({"rule_id": rule.rule_id, "params": params, **metrics})

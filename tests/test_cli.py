@@ -607,3 +607,25 @@ def test_card_records_validate_runs_and_flags_reruns(cli_env, monkeypatch):
     text = md.read_text(encoding="utf-8")
     assert "검증 실행 2회" in text
     assert "검증 기간 구간 안정성" in text                      # I6 label on the card
+
+
+def test_pipeline_passes_the_scenario_mask_to_signals(cli_env, monkeypatch):
+    from autotrade.rules.swing.breakout import Breakout
+    calls = []
+    real = Breakout.signals
+
+    def spy(self, panel, eligible=None):
+        calls.append(None if eligible is None else int(eligible.to_numpy().sum()))
+        return real(self, panel, eligible=eligible)
+    monkeypatch.setattr(Breakout, "signals", spy)
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    run(["validate", "--pocket", "swing", "--market", "kr", "--top", "1"])
+    rid = first_recommended_rule_id(cli_env)
+    monkeypatch.setattr(pipeline, "run_nautilus", lambda *a, **k: pd.DataFrame(columns=[
+        "symbol", "entry_date", "entry_price", "exit_date", "exit_price", "exit_reason",
+        "stop_pct", "confidence", "qty", "net_pnl"]))
+    n_before = len(calls)
+    pipeline.verify_final("swing", "kr", rid)
+    assert calls and None not in calls
+    final = calls[n_before:]                     # paper and real masks differ in size
+    assert len(final) == 4 and final[0] != final[2]

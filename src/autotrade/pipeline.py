@@ -396,9 +396,10 @@ def _collect_failed(market: str, sym: str, e: Exception, failed: list[str],
     log.warning("collect %s %s failed: %s: %s", market, sym, type(e).__name__, e)
     failed.append(f"{sym}: {type(e).__name__}: {e}")
     streak += 1
-    if streak >= MAX_CONSECUTIVE_FAILURES:
+    if streak >= MAX_CONSECUTIVE_FAILURES:    # error type (+ API code) only: one line, and
+        code = f" code={e.code}" if isinstance(e, TossApiError) else ""   # no message text
         raise LabError(f"collect aborted after {streak} consecutive symbol failures (last "
-                       f"{sym}: {type(e).__name__}: {e})") from e
+                       f"{sym}: {type(e).__name__}{code})") from e
     return streak
 
 

@@ -1113,3 +1113,18 @@ def test_collecting_past_the_cutoff_does_not_change_sealed_run_signals(cli_env):
     first = sealed_run()
     extend_store(10)                                   # a later collect: September bars
     pd.testing.assert_frame_equal(sealed_run(), first)
+
+
+@pytest.mark.parametrize("make_error,expected", [
+    (lambda: RuntimeError("line one\nAuthorization: Bearer s3cr3t-token"), "(last 000002: RuntimeError)"),
+    (lambda: __import__("autotrade.toss.client", fromlist=["TossApiError"]).TossApiError(
+        500, "internal-error", "req-123"), "(last 000002: TossApiError code=internal-error)"),
+])
+def test_consecutive_failure_abort_message_is_one_line_without_details(
+        cli_env, monkeypatch, make_error, expected):
+    monkeypatch.setattr(pipeline, "MAX_CONSECUTIVE_FAILURES", 2)
+    _collect_env(monkeypatch, 3, lambda s: make_error())
+    r = CliRunner().invoke(app, ["collect", "--market", "kr", "--since", "2016-01-01"])
+    assert r.exit_code == 1 and len(r.output.strip().splitlines()) == 1
+    assert "2 consecutive" in r.output and expected in r.output
+    assert "s3cr3t" not in r.output and "req-123" not in r.output

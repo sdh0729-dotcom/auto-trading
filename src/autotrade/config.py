@@ -14,16 +14,46 @@ class ConfigError(Exception):
     pass
 
 
+def repo_root() -> Path:
+    """The directory containing pyproject.toml above this package (falls back to cwd)."""
+    for d in Path(__file__).resolve().parents:
+        if (d / "pyproject.toml").exists():
+            return d
+    return Path.cwd()
+
+
+def env_path(name: str, default: Path) -> Path:
+    """Path from environment variable `name`; relative values resolve against the repo root
+    (not the current directory), unset/empty gives `default`."""
+    value = os.environ.get(name)
+    if not value:
+        return default
+    p = Path(value).expanduser()
+    return p if p.is_absolute() else repo_root() / p
+
+
+_LOADED_DOTENV: set[Path] = set()
+
+
+def load_env() -> None:
+    """Load the repo's .env (or $AUTOTRADE_DOTENV) into os.environ once per process; values
+    already in the environment win."""
+    from dotenv import load_dotenv
+
+    path = env_path("AUTOTRADE_DOTENV", repo_root() / ".env")
+    if path in _LOADED_DOTENV:
+        return
+    _LOADED_DOTENV.add(path)
+    if path.exists():
+        load_dotenv(path, override=False)
+
+
 def _config_root() -> Path:
-    env = os.environ.get("AUTOTRADE_CONFIG")
-    if env:
-        return Path(env)
-    return Path(__file__).resolve().parents[2] / "config"
+    return env_path("AUTOTRADE_CONFIG", repo_root() / "config")
 
 
 def _synced_path() -> Path:
-    env = os.environ.get("AUTOTRADE_SYNCED")
-    return Path(env) if env else _config_root() / "synced.yaml"
+    return env_path("AUTOTRADE_SYNCED", _config_root() / "synced.yaml")
 
 
 def _read(path: Path) -> dict:

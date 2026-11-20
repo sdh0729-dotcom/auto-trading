@@ -17,10 +17,9 @@ CALENDAR_MIN_SHARE = 0.5      # d is a trading day if >= 50% of the active symbo
 
 
 def data_root() -> Path:
-    env = os.environ.get("AUTOTRADE_DATA")
-    if env:
-        return Path(env)
-    return Path(__file__).resolve().parents[3] / "data"
+    from autotrade.config import env_path, repo_root
+
+    return env_path("AUTOTRADE_DATA", repo_root() / "data")
 
 
 def _daily_dir(market: Market) -> Path:

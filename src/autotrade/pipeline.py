@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -23,8 +22,8 @@ import pandas as pd
 import yaml
 
 from autotrade.config import (ConfigError, LabConfig, MarketConfig, PocketConfig, SyncedValues,
-                              _synced_path, load_lab, load_market, load_market_raw,
-                              load_pocket, load_synced)
+                              _synced_path, env_path, load_lab, load_market, load_market_raw,
+                              load_pocket, load_synced, repo_root)
 from autotrade.costs import CostModel
 from autotrade.data.collect import collect_daily, collect_meta
 from autotrade.data.delisted_kr import supplement_delisted_kr
@@ -66,8 +65,7 @@ class LabError(Exception):
 
 # ---------------------------------------------------------------- paths
 def research_root() -> Path:
-    env = os.environ.get("AUTOTRADE_RESEARCH")
-    return Path(env) if env else Path(__file__).resolve().parents[2] / "research"
+    return env_path("AUTOTRADE_RESEARCH", repo_root() / "research")
 
 
 def experiments_path() -> Path:

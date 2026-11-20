@@ -62,10 +62,12 @@ def same_prices(old: pd.DataFrame, new: pd.DataFrame, market: Market) -> bool:
 
 
 def _fetch(client: TossClient, market: Market, symbol: str, stop_at: pd.Timestamp,
-           before: datetime | None = None) -> tuple[pd.DataFrame | None, bool]:
+           today: pd.Timestamp, before: datetime | None = None
+           ) -> tuple[pd.DataFrame | None, bool]:
     """Newest-first pages (from `before`, inclusive) until a page's oldest bar is <= stop_at
     or the history ends. Returns (bars or None, complete) where complete means no bar on or
-    after stop_at is missing."""
+    after stop_at is missing. Bars dated `today` or later (a session that may still be
+    open) are dropped."""
     pages: list[pd.DataFrame] = []
     complete = False
     while True:
@@ -87,30 +89,41 @@ def _fetch(client: TossClient, market: Market, symbol: str, stop_at: pd.Timestam
     if not pages:
         return None, complete
     new = clean_daily(pd.concat(pages))
-    new = new[~new.index.duplicated(keep="first")].sort_index()
+    new = new[~new.index.duplicated(keep="first") & (new.index < today)].sort_index()
     return (new if len(new) else None), complete
+
+
+def market_today(market: Market, now: pd.Timestamp | None = None) -> pd.Timestamp:
+    """The market's current local session date (tz-naive midnight)."""
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    return now.tz_convert(TZ[market]).tz_localize(None).normalize()
 
 
 def _local_midnight(day: pd.Timestamp, market: Market) -> datetime:
     return pd.Timestamp(day).tz_localize(TZ[market]).to_pydatetime()
 
 
-def collect_daily(client: TossClient, market: Market, symbol: str, start: date) -> int:
+def collect_daily(client: TossClient, market: Market, symbol: str, start: date,
+                  today: date | None = None) -> int:
     """Fetch daily bars newer than what is stored (back to `start`); return rows added.
+
+    Bars dated on/after `today` (default: the market's local date) are never stored: that
+    session may still be open, so its bar is not final.
 
     The stored bar(s) on the overlap date(s) are compared with the fetched ones: a different
     price (adjusted history rescaled, e.g. by a split) refetches the whole history from
     `start` and replaces the file. A stored history that starts after `start` is backfilled
     (older pages until `start`) unless it is already known complete from `start`."""
     start_ts = pd.Timestamp(start)
+    today_ts = market_today(market) if today is None else pd.Timestamp(today)
     existing = load_daily(market, symbol)
     if existing is not None and existing.empty:
         existing = None
     try:
         if existing is None:
-            merged = _full(client, market, symbol, start_ts)
+            merged = _full(client, market, symbol, start_ts, today_ts)
         else:
-            merged = _incremental(client, market, symbol, start_ts, existing)
+            merged = _incremental(client, market, symbol, start_ts, today_ts, existing)
     except TossApiError as e:
         if e.status == 404 and e.code == "stock-not-found":
             log.warning("stock-not-found: %s %s", market, symbol)
@@ -129,35 +142,36 @@ def _finish(bars: pd.DataFrame, start_ts: pd.Timestamp, history_from) -> pd.Data
     return out
 
 
-def _full(client, market, symbol, start_ts) -> pd.DataFrame | None:
-    new, complete = _fetch(client, market, symbol, start_ts)
+def _full(client, market, symbol, start_ts, today_ts) -> pd.DataFrame | None:
+    new, complete = _fetch(client, market, symbol, start_ts, today_ts)
     if new is None:
         return None
     return _finish(new, start_ts, start_ts.date().isoformat() if complete else None)
 
 
-def _incremental(client, market, symbol, start_ts, existing) -> pd.DataFrame | None:
+def _incremental(client, market, symbol, start_ts, today_ts, existing
+                 ) -> pd.DataFrame | None:
     last = existing.index.max()
-    new, _ = _fetch(client, market, symbol, last)
+    new, _ = _fetch(client, market, symbol, last, today_ts)
     if new is None:
         return None
     if not same_prices(existing, new, market):
         log.warning("%s %s: stored prices differ from the API on the overlap (adjustment "
                     "changed, e.g. a split); refetching the full history from %s",
                     market, symbol, start_ts.date())
-        return _full(client, market, symbol, start_ts)
+        return _full(client, market, symbol, start_ts, today_ts)
     merged = pd.concat([existing, new])
     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
     history_from = existing.attrs.get(HISTORY_FROM)
     known = history_from is not None and pd.Timestamp(history_from) <= start_ts
     if merged.index.min() > start_ts and not known:
-        older, complete = _fetch(client, market, symbol, start_ts,
+        older, complete = _fetch(client, market, symbol, start_ts, today_ts,
                                  before=_local_midnight(merged.index.min(), market))
         if older is not None:
             if not same_prices(merged, older, market):
                 log.warning("%s %s: older bars do not match the stored scale; refetching "
                             "the full history from %s", market, symbol, start_ts.date())
-                return _full(client, market, symbol, start_ts)
+                return _full(client, market, symbol, start_ts, today_ts)
             merged = pd.concat([older, merged])
             merged = merged[~merged.index.duplicated(keep="last")].sort_index()
         history_from = start_ts.date().isoformat() if complete else history_from

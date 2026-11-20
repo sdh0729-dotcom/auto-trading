@@ -77,3 +77,35 @@ def test_panel_slice_inclusive_and_symbols():
 
 def test_trade_columns():
     assert TRADE_COLUMNS[0] == "symbol" and len(TRADE_COLUMNS) == 8
+
+
+def test_relative_env_paths_resolve_against_repo_root(tmp_path, monkeypatch):
+    from autotrade import pipeline
+    from autotrade.config import _config_root, _synced_path, repo_root
+    from autotrade.data.store import data_root
+    root = repo_root()
+    assert (root / "pyproject.toml").exists()
+    monkeypatch.chdir(tmp_path)                       # cwd elsewhere
+    monkeypatch.setenv("AUTOTRADE_DATA", "./data-rel")
+    monkeypatch.setenv("AUTOTRADE_RESEARCH", "research-rel")
+    monkeypatch.setenv("AUTOTRADE_CONFIG", "config")
+    monkeypatch.setenv("AUTOTRADE_SYNCED", "config/synced-rel.yaml")
+    assert data_root() == root / "data-rel"
+    assert pipeline.research_root() == root / "research-rel"
+    assert _config_root() == root / "config"
+    assert _synced_path() == root / "config" / "synced-rel.yaml"
+    monkeypatch.setenv("AUTOTRADE_DATA", str(tmp_path / "abs"))
+    assert data_root() == tmp_path / "abs"           # absolute paths unchanged
+
+
+def test_cli_loads_dotenv_before_computing_paths(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    from autotrade.cli import app
+    env = tmp_path / ".env"
+    env.write_text(f"AUTOTRADE_RESEARCH={tmp_path / 'from-dotenv'}\n")
+    monkeypatch.setenv("AUTOTRADE_DOTENV", str(env))
+    monkeypatch.setenv("AUTOTRADE_RESEARCH", "x")
+    monkeypatch.delenv("AUTOTRADE_RESEARCH")            # unset now, removed again at teardown
+    r = CliRunner().invoke(app, ["journal", "메모"])
+    assert r.exit_code == 0, r.output
+    assert list((tmp_path / "from-dotenv" / "journal").glob("*.md"))

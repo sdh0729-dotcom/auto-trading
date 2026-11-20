@@ -69,6 +69,9 @@ class FakeClient:
 @pytest.fixture
 def tmp_data(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTOTRADE_DATA", str(tmp_path))
+    # clock-independent: the fake histories end before "today" unless a test says otherwise
+    monkeypatch.setattr("autotrade.data.collect.market_today",
+                        lambda market, now=None: pd.Timestamp("2100-01-01"))
     return tmp_path
 
 
@@ -361,3 +364,20 @@ def test_save_meta_is_atomic(tmp_data, monkeypatch):
             save_meta("kr", meta.assign(name="b"))
     assert load_meta("kr").equals(meta)
     assert [f.name for f in (tmp_data / "kr").iterdir()] == ["meta.parquet"]
+
+
+def test_market_today_is_the_local_session_date():
+    from autotrade.data.collect import market_today
+    now = pd.Timestamp("2026-03-25T23:30:00+00:00")
+    assert market_today("kr", now) == pd.Timestamp("2026-03-26")
+    assert market_today("us", now) == pd.Timestamp("2026-03-25")
+
+
+def test_bars_of_the_current_session_are_not_stored(tmp_data):
+    c = FakeClient(first="2026-03-16", last="2026-03-25")
+    collect_daily(c, "kr", "X", start=date(2026, 1, 1), today=date(2026, 3, 25))
+    assert load_daily("kr", "X").index.max() == pd.Timestamp("2026-03-24")
+    # next day: the now-final 03-25 bar is added, 03-26 (today) is not
+    c.add_new_day("2026-03-26")
+    assert collect_daily(c, "kr", "X", start=date(2026, 1, 1), today=date(2026, 3, 26)) == 1
+    assert load_daily("kr", "X").index.max() == pd.Timestamp("2026-03-25")

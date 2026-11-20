@@ -123,7 +123,9 @@ class TossClient:
 
 
 def make_client_from_env(token_path: Path) -> TossClient:
-    load_dotenv()
+    from autotrade.config import env_path, repo_root
+
+    load_dotenv(env_path("AUTOTRADE_DOTENV", repo_root() / ".env"), override=False)
     vals = {}
     for name in ("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET"):
         v = os.environ.get(name)

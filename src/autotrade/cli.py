@@ -9,13 +9,20 @@ import pandas as pd
 import typer
 
 from autotrade import pipeline
-from autotrade.config import ConfigError
+from autotrade.config import ConfigError, load_env
 from autotrade.validate.seal import SealViolation
 
 app = typer.Typer(no_args_is_help=True, add_completion=False,
                   help="Auto-trading research lab (read-only market data, no orders).")
 
 EXPECTED_ERRORS = (pipeline.LabError, ConfigError, SealViolation)
+
+
+@app.callback()
+def _startup() -> None:
+    """Runs before every command: load .env first, so paths and credentials it sets are seen
+    by everything that follows."""
+    load_env()
 
 
 def _expected_errors(fn):

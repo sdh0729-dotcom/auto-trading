@@ -215,3 +215,17 @@ def test_period_segments_cover_the_period_contiguously():
     assert max(sizes) - min(sizes) <= 1
     with pytest.raises(ValueError):
         period_segments(date(2020, 1, 1), date(2020, 1, 2), n=4)
+
+
+def test_rebuild_record_from_tickets(tmp_path):
+    from autotrade.validate.periods import PeriodError, new_record, rebuild_record
+    reg = SealRegistry(tmp_path / "seal.json")
+    rec = new_record("swing", "kr", DATES[:800], (0.6, 0.2, 0.2))
+    sealed = (rec.periods.sealed[0].isoformat(), rec.periods.sealed[1].isoformat())
+    reg.open("swing", "kr", "a:1", sealed=sealed, data_cutoff=rec.data_cutoff.isoformat())
+    got = rebuild_record("swing", "kr", reg.tickets("swing", "kr"), DATES, (0.6, 0.2, 0.2), 3)
+    assert got.periods == rec.periods and got.data_cutoff == rec.data_cutoff
+    assert got.cycle == 1 and got.validate_runs == 3
+    reg.open("swing", "kr", "a:2", sealed=sealed, data_cutoff=DATES[900].date().isoformat())
+    with pytest.raises(PeriodError, match="disagree"):
+        rebuild_record("swing", "kr", reg.tickets("swing", "kr"), DATES, (0.6, 0.2, 0.2))

@@ -3,7 +3,8 @@
 
 Periods: on the first `screen` of a pocket x market the stored trading dates from
 `lab.swing_start` on are split by `lab.split` into train / valid / sealed and persisted in
-research/periods-{pocket}-{market}.json (with the data cutoff); every later command reads that
+research/periods-{pocket}-{market}.json (with the data cutoff) once the screen's checks
+passed; a lost file is rebuilt from the seal tickets, not re-split. Every later command reads that
 file, so later collects never move a boundary (`lab periods --new-cycle` starts a
 re-validation cycle, spec 7.9). `screen` loads prices only through the train end, `validate`
 only through the valid end, and both refuse ranges overlapping an already-opened sealed
@@ -147,9 +148,42 @@ def _load_periods(pocket: str, market: str) -> PeriodRecord | None:
         raise LabError(str(e)) from e
 
 
+def _validate_runs_logged(pocket: str, market: str, valid: tuple[date, date]) -> int:
+    """Highest `validate_run` the experiment log holds for the valid period (0 if none)."""
+    rows = ExperimentLog(experiments_path()).rows(pocket, market)
+    want = list(_iso(valid))
+    runs = [int(m.get("validate_run", 0) or 0) for st, p, m in
+            zip(rows["stage"], rows["period"], rows["metrics"])
+            if st == "validate" and list(p) == want and isinstance(m, dict)]
+    return max(runs, default=0)
+
+
+def _new_periods(pocket: str, market: str, lab: LabConfig) -> PeriodRecord:
+    """The period record for a missing file: rebuilt from the seal tickets when some exist
+    (a fresh split could move over an opened seal), else split from the stored dates."""
+    tickets = SealRegistry(seal_path()).tickets(pocket, market)
+    cal = trading_dates(market, lab.swing_start, date.today())
+    if len(cal) == 0:
+        raise LabError(f"no daily data for {market}: run `lab collect --market {market}` first")
+    if tickets:
+        try:
+            rec = period_store.rebuild_record(pocket, market, tickets, cal, lab.split)
+        except PeriodError as e:
+            raise LabError(f"{periods_path(pocket, market)} is missing and the seal tickets "
+                           f"of {pocket}/{market} cannot rebuild it ({e}): restore the periods "
+                           "file") from e
+        return replace(rec, validate_runs=_validate_runs_logged(pocket, market,
+                                                                rec.periods.valid))
+    try:
+        return period_store.new_record(pocket, market, cal, lab.split)
+    except ValueError as e:
+        raise LabError(f"not enough daily data for {market} to split periods: {e}") from e
+
+
 def _setup(pocket: str, market: str, create: bool = False) -> Setup:
     """Configs + the persisted period split (no prices are read). Only `create` (the first
-    `screen`) may split the stored trading dates and write the period file."""
+    `screen`) may make the period record (see `_new_periods`); it is written only after the
+    screen's checks passed on it."""
     _check_market(market)
     _families(pocket)
     _refuse_limited(market)
@@ -158,14 +192,8 @@ def _setup(pocket: str, market: str, create: bool = False) -> Setup:
     if rec is None:
         if not create:
             raise LabError(f"no periods for {pocket}/{market}: run `lab screen` first")
-        cal = trading_dates(market, lab.swing_start, date.today())
-        if len(cal) == 0:
-            raise LabError(f"no daily data for {market}: run `lab collect --market {market}` "
-                           "first")
-        try:
-            rec = period_store.new_record(pocket, market, cal, lab.split)
-        except ValueError as e:
-            raise LabError(f"not enough daily data for {market} to split periods: {e}") from e
+        rec = _new_periods(pocket, market, lab)
+        _refuse_opened_overlap(pocket, market, *rec.periods.train, "screen")
         period_store.save_record(periods_path(pocket, market), rec)
     cal = trading_dates(market, lab.swing_start, rec.data_cutoff)
     if len(cal) == 0:
@@ -392,12 +420,13 @@ def universe(market: str, pocket: str, scenario: str, day: date) -> list[str]:
 def screen(pocket: str, market: str, family: str = "all") -> pd.DataFrame:
     """Every grid point of the chosen families on the train period (fixed amount, paper
     universe), logged as screen trials; sorted by mean_net_r."""
-    s = _setup(pocket, market, create=True)
+    _check_market(market)
     fams = _families(pocket)
     names = list(fams) if family == "all" else [family]
     for n in names:
         if n not in fams:
             raise LabError(f"unknown family {n!r} (choose from all, {', '.join(fams)})")
+    s = _setup(pocket, market, create=True)
     t0, t1 = s.periods.train
     _refuse_opened_overlap(pocket, market, t0, t1, "screen")
     panel = _panel(s, t1)

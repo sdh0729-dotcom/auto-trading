@@ -519,13 +519,20 @@ def test_screen_and_validate_refuse_ranges_overlapping_an_opened_seal(cli_env):
     SealRegistry(cli_env.research / "seal-registry.json").open(
         "swing", "kr", "breakout:x", sealed=(per.sealed[0].isoformat(),
                                              per.sealed[1].isoformat()))
-    periods_file(cli_env).unlink()                       # periods lost, data grew: re-split
+    # a lost periods file is rebuilt from the tickets (P1); a file re-split on grown data
+    # (e.g. replaced by hand) is what can still overlap the opened seal
+    def resplit():
+        from autotrade.validate import periods as period_store
+        dates = store.trading_dates("kr", date(2016, 1, 1), date(2100, 1, 1))
+        period_store.save_record(periods_file(cli_env),
+                                 period_store.new_record("swing", "kr", dates, (0.6, 0.2, 0.2)))
     extend_store(100)
+    resplit()
     run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
     r = CliRunner().invoke(app, ["validate", "--pocket", "swing", "--market", "kr"])
     assert r.exit_code == 1 and "opened" in r.output and "Traceback" not in r.output
-    periods_file(cli_env).unlink()
     extend_store(300)                                    # now even the train range overlaps
+    resplit()
     r = CliRunner().invoke(app, ["screen", "--pocket", "swing", "--market", "kr",
                                  "--family", "breakout"])
     assert r.exit_code == 1 and "opened" in r.output
@@ -681,3 +688,86 @@ def test_sync_stores_promo_end_and_warns_when_past(cli_env, monkeypatch):
     monkeypatch.setattr(pipeline, "commission_warnings", lambda today=None: w)
     r = run(["journal", "x"])
     assert "2026-12-31" in r.output                       # printed before any command runs
+
+
+# ---------------------------------------------------------------- P1: periods file safety
+def test_refused_screen_writes_no_periods_file(cli_env, monkeypatch):
+    from autotrade.validate.seal import SealViolation
+
+    def refuse(*a, **k):
+        raise SealViolation("screen range overlaps the sealed period already opened")
+    monkeypatch.setattr(pipeline, "_refuse_opened_overlap", refuse)
+    r = CliRunner().invoke(app, ["screen", "--pocket", "swing", "--market", "kr",
+                                 "--family", "breakout"])
+    assert r.exit_code == 1 and "opened" in r.output
+    assert not periods_file(cli_env).exists()
+    r = CliRunner().invoke(app, ["screen", "--pocket", "swing", "--market", "kr",
+                                 "--family", "nope"])
+    assert r.exit_code == 1 and not periods_file(cli_env).exists()
+
+
+def _open_ticket(env, rule_id, sealed, cutoff, cycle=1):
+    from autotrade.validate.seal import SealRegistry
+    return SealRegistry(env.research / "seal-registry.json").open(
+        "swing", "kr", rule_id, sealed=(sealed[0].isoformat(), sealed[1].isoformat()),
+        data_cutoff=cutoff.isoformat(), n_symbols=len(SYMBOLS), cycle=cycle)
+
+
+def _split_keys(rec: dict) -> dict:
+    return {k: rec[k] for k in ("train", "valid", "sealed", "data_cutoff", "cycle", "history")}
+
+
+def test_lost_periods_file_is_rebuilt_from_seal_tickets(cli_env):
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    before = json.loads(periods_file(cli_env).read_text(encoding="utf-8"))
+    per = periods_of(cli_env)
+    _open_ticket(cli_env, "breakout:x", per.sealed, per.sealed[1])
+    log = ExperimentLog(cli_env.research / "experiments.jsonl")
+    log.record("swing", "kr", "breakout", "breakout:x", {}, "validate", pipeline._iso(per.valid),
+               {"valid_daily_sharpe": 0.1, "validate_run": 2})
+    periods_file(cli_env).unlink()
+    extend_store(300)                 # a fresh split would now put train over the opened seal
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    after = json.loads(periods_file(cli_env).read_text(encoding="utf-8"))
+    assert _split_keys(after) == _split_keys(before)
+    assert after["validate_runs"] == 2                # recovered from the experiment log
+
+
+def test_lost_periods_file_rebuild_refuses_inconsistent_tickets(cli_env):
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    per = periods_of(cli_env)
+    later = pd.bdate_range(per.sealed[0], periods=5)[-1].date()
+    _open_ticket(cli_env, "breakout:x", (later, per.sealed[1]), per.sealed[1])  # not the split
+    periods_file(cli_env).unlink()
+    r = CliRunner().invoke(app, ["screen", "--pocket", "swing", "--market", "kr",
+                                 "--family", "breakout"])
+    assert r.exit_code == 1 and "Traceback" not in r.output
+    assert "seal" in r.output and "periods" in r.output
+    assert not periods_file(cli_env).exists()
+
+
+def test_lost_periods_file_without_cutoff_in_tickets_is_refused(cli_env):
+    from autotrade.validate.seal import SealRegistry
+    per = periods_of(cli_env)
+    SealRegistry(cli_env.research / "seal-registry.json").open(
+        "swing", "kr", "breakout:x", sealed=pipeline._iso(per.sealed))   # no data_cutoff
+    r = CliRunner().invoke(app, ["screen", "--pocket", "swing", "--market", "kr",
+                                 "--family", "breakout"])
+    assert r.exit_code == 1 and "data cutoff" in r.output
+    assert not periods_file(cli_env).exists()
+
+
+def test_lost_periods_file_is_rebuilt_in_a_later_cycle(cli_env):
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    per = periods_of(cli_env)
+    _open_ticket(cli_env, "breakout:x", per.sealed, per.sealed[1])
+    extend_store(70)
+    run(["periods", "--pocket", "swing", "--market", "kr", "--new-cycle"])
+    before = json.loads(periods_file(cli_env).read_text(encoding="utf-8"))
+    sealed2 = tuple(date.fromisoformat(x) for x in before["sealed"])
+    _open_ticket(cli_env, "breakout:x", sealed2, sealed2[1], cycle=2)
+    periods_file(cli_env).unlink()
+    extend_store(10)
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    after = json.loads(periods_file(cli_env).read_text(encoding="utf-8"))
+    assert after["cycle"] == 2 and _split_keys(after) == _split_keys(before)

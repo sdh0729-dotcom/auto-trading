@@ -381,3 +381,51 @@ def test_bars_of_the_current_session_are_not_stored(tmp_data):
     c.add_new_day("2026-03-26")
     assert collect_daily(c, "kr", "X", start=date(2026, 1, 1), today=date(2026, 3, 26)) == 1
     assert load_daily("kr", "X").index.max() == pd.Timestamp("2026-03-25")
+
+
+def test_since_never_deletes_stored_history(tmp_data):
+    """Reviewer probe: `--since` only bounds the fetch; older stored rows stay, and the
+    history_from marker keeps matching what the file covers."""
+    c = FakeClient(first="2020-01-02", last="2025-01-31")
+    collect_daily(c, "kr", "X", start=date(2020, 1, 1))
+    full = load_daily("kr", "X")
+    n_full = len(full)
+    c.add_new_day("2025-02-03")
+    assert collect_daily(c, "kr", "X", start=date(2024, 6, 1)) == 1
+    df = load_daily("kr", "X")
+    assert len(df) == n_full + 1 and df.index.min() == full.index.min()
+    assert df.attrs["history_from"] == "2020-01-01"
+    c.add_new_day("2025-02-04")
+    assert collect_daily(c, "kr", "X", start=date(2020, 1, 1)) == 1
+    assert c.pages_requested_last_run == 1                    # no needless backfill
+    df = load_daily("kr", "X")
+    assert len(df) == n_full + 2 and df.index.min() == full.index.min()
+    assert df.attrs["history_from"] == "2020-01-01"
+
+
+def test_since_adjustment_change_refetches_from_earliest_stored_start(tmp_data):
+    c = FakeClient(first="2020-01-02", last="2025-01-31")
+    collect_daily(c, "kr", "X", start=date(2020, 1, 1))
+    c.add_new_day("2025-02-03")
+    c.split = 2.0
+    assert collect_daily(c, "kr", "X", start=date(2024, 6, 1)) >= 0
+    df = load_daily("kr", "X")
+    assert df.index.min() == pd.Timestamp("2020-01-02") and len(df) == len(c.days)
+    expected = np.array([c._bar(d, i)["close"] for i, d in enumerate(c.days)])
+    assert np.allclose(df["close"].to_numpy(), expected)      # one scale throughout
+    assert df.attrs["history_from"] == "2020-01-01"
+
+
+def test_since_earlier_than_history_from_backfills(tmp_data):
+    c = FakeClient(first="2015-06-01", last="2025-01-31")
+    collect_daily(c, "kr", "X", start=date(2024, 1, 1))
+    assert load_daily("kr", "X").attrs["history_from"] == "2024-01-01"
+    added = collect_daily(c, "kr", "X", start=date(2022, 1, 1))
+    df = load_daily("kr", "X")
+    assert added == len(pd.bdate_range("2022-01-01", "2023-12-29"))
+    assert df.index.min() == pd.Timestamp("2022-01-03")
+    assert df.attrs["history_from"] == "2022-01-01"
+    collect_daily(c, "kr", "X", start=date(2023, 1, 1))       # later --since: keeps all
+    df = load_daily("kr", "X")
+    assert df.index.min() == pd.Timestamp("2022-01-03")
+    assert df.attrs["history_from"] == "2022-01-01"

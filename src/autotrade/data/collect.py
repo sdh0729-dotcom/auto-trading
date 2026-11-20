@@ -110,10 +110,13 @@ def collect_daily(client: TossClient, market: Market, symbol: str, start: date,
     Bars dated on/after `today` (default: the market's local date) are never stored: that
     session may still be open, so its bar is not final.
 
+    `start` only bounds what is fetched; stored rows older than `start` are never removed.
+
     The stored bar(s) on the overlap date(s) are compared with the fetched ones: a different
-    price (adjusted history rescaled, e.g. by a split) refetches the whole history from
-    `start` and replaces the file. A stored history that starts after `start` is backfilled
-    (older pages until `start`) unless it is already known complete from `start`."""
+    price (adjusted history rescaled, e.g. by a split) replaces the file by a refetch from
+    the earliest of `start` and the stored history start, so one price scale remains. A
+    stored history that starts after `start` is backfilled (older pages until `start`)
+    unless it is already known complete from `start`."""
     start_ts = pd.Timestamp(start)
     today_ts = market_today(market) if today is None else pd.Timestamp(today)
     existing = load_daily(market, symbol)
@@ -132,11 +135,11 @@ def collect_daily(client: TossClient, market: Market, symbol: str, start: date,
     if merged is None:
         return 0
     save_daily(market, symbol, merged)
-    return len(merged) - (len(existing) if existing is not None else 0)
+    return max(0, len(merged) - (len(existing) if existing is not None else 0))
 
 
-def _finish(bars: pd.DataFrame, start_ts: pd.Timestamp, history_from) -> pd.DataFrame:
-    out = bars[bars.index >= start_ts].copy()
+def _finish(bars: pd.DataFrame, history_from) -> pd.DataFrame:
+    out = bars.copy()
     out["source"] = out["source"].fillna("toss") if "source" in out.columns else "toss"
     out.attrs = {HISTORY_FROM: history_from} if history_from else {}
     return out
@@ -146,7 +149,16 @@ def _full(client, market, symbol, start_ts, today_ts) -> pd.DataFrame | None:
     new, complete = _fetch(client, market, symbol, start_ts, today_ts)
     if new is None:
         return None
-    return _finish(new, start_ts, start_ts.date().isoformat() if complete else None)
+    new = new[new.index >= start_ts]
+    return _finish(new, start_ts.date().isoformat() if complete else None)
+
+
+def _refetch_from(existing: pd.DataFrame, start_ts: pd.Timestamp) -> pd.Timestamp:
+    """Start of a full refetch that replaces `existing`: nothing already stored is dropped."""
+    points = [start_ts, existing.index.min()]
+    if existing.attrs.get(HISTORY_FROM):
+        points.append(pd.Timestamp(existing.attrs[HISTORY_FROM]))
+    return min(points)
 
 
 def _incremental(client, market, symbol, start_ts, today_ts, existing
@@ -158,8 +170,8 @@ def _incremental(client, market, symbol, start_ts, today_ts, existing
     if not same_prices(existing, new, market):
         log.warning("%s %s: stored prices differ from the API on the overlap (adjustment "
                     "changed, e.g. a split); refetching the full history from %s",
-                    market, symbol, start_ts.date())
-        return _full(client, market, symbol, start_ts, today_ts)
+                    market, symbol, _refetch_from(existing, start_ts).date())
+        return _full(client, market, symbol, _refetch_from(existing, start_ts), today_ts)
     merged = pd.concat([existing, new])
     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
     history_from = existing.attrs.get(HISTORY_FROM)
@@ -170,12 +182,16 @@ def _incremental(client, market, symbol, start_ts, today_ts, existing
         if older is not None:
             if not same_prices(merged, older, market):
                 log.warning("%s %s: older bars do not match the stored scale; refetching "
-                            "the full history from %s", market, symbol, start_ts.date())
-                return _full(client, market, symbol, start_ts, today_ts)
+                            "the full history from %s", market, symbol,
+                            _refetch_from(existing, start_ts).date())
+                return _full(client, market, symbol, _refetch_from(existing, start_ts),
+                             today_ts)
+            older = older[older.index >= start_ts]
             merged = pd.concat([older, merged])
             merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-        history_from = start_ts.date().isoformat() if complete else history_from
-    return _finish(merged, start_ts, history_from)
+        if complete:
+            history_from = min(start_ts, pd.Timestamp(history_from or start_ts)).date().isoformat()
+    return _finish(merged, history_from)
 
 
 def collect_meta(client: TossClient, market: Market) -> pd.DataFrame:

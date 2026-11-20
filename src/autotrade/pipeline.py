@@ -335,6 +335,27 @@ def sync(kr_commission: float | None = None, us_commission: float | None = None,
 
 
 # ---------------------------------------------------------------- collect
+# failures that hit every symbol alike: abort the whole collect instead of retrying ~2.5k
+SYSTEMIC_STATUS = {401: "credentials rejected (401 after one re-auth): check TOSS_CLIENT_ID "
+                        "/ TOSS_CLIENT_SECRET",
+                   403: "access forbidden (403): check the API key's permissions / IP "
+                        "allowlist"}
+MAX_CONSECUTIVE_FAILURES = 20
+
+
+def _collect_failed(market: str, sym: str, e: Exception, failed: list[str],
+                    streak: int) -> int:
+    """Record one symbol's failure; abort after MAX_CONSECUTIVE_FAILURES in a row (offline,
+    API down). Returns the new streak."""
+    log.warning("collect %s %s failed: %s: %s", market, sym, type(e).__name__, e)
+    failed.append(f"{sym}: {type(e).__name__}: {e}")
+    streak += 1
+    if streak >= MAX_CONSECUTIVE_FAILURES:
+        raise LabError(f"collect aborted after {streak} consecutive symbol failures (last "
+                       f"{sym}: {type(e).__name__}: {e})") from e
+    return streak
+
+
 def collect(market: str, since: date | None = None, limit: int | None = None) -> dict:
     """Meta -> incremental daily bars (Toss) -> (KR) pykrx delisted supplement -> quality
     summary. `limit` keeps the first N symbols, always_include first, and marks the data
@@ -353,13 +374,18 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
         delisted = set(str(s) for s in meta.index[meta["delisted"].astype(bool)])
         via_pykrx = [s for s in ordered if s in delisted] if mc.delisted_supplement else []
         via_toss = [s for s in ordered if s not in set(via_pykrx)]
-        added, failed = 0, []
+        added, failed, streak = 0, [], 0
         for sym in via_toss:            # one failing symbol is reported, the run continues
             try:
                 added += collect_daily(client, market, sym, start)
+                streak = 0
+            except TossApiError as e:
+                if e.status in SYSTEMIC_STATUS:     # the client already re-authed once on 401
+                    raise LabError(f"collect aborted at {sym}: {SYSTEMIC_STATUS[e.status]} "
+                                   f"(Toss API status={e.status} code={e.code})") from e
+                streak = _collect_failed(market, sym, e, failed, streak)
             except Exception as e:      # noqa: BLE001 - messages carry no secrets
-                log.warning("collect %s %s failed: %s: %s", market, sym, type(e).__name__, e)
-                failed.append(f"{sym}: {type(e).__name__}: {e}")
+                streak = _collect_failed(market, sym, e, failed, streak)
     except TossApiError as e:
         raise LabError(f"collect failed: {e}") from e
     except httpx.HTTPError as e:

@@ -771,3 +771,53 @@ def test_lost_periods_file_is_rebuilt_in_a_later_cycle(cli_env):
     run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
     after = json.loads(periods_file(cli_env).read_text(encoding="utf-8"))
     assert after["cycle"] == 2 and _split_keys(after) == _split_keys(before)
+
+
+# ---------------------------------------------------------------- P2: systemic collect failures
+def _collect_env(monkeypatch, n: int, fail):
+    """`n` symbols; fake_daily raises fail(symbol) when it returns an exception."""
+    syms = [f"{i:06d}" for i in range(1, n + 1)]
+    meta = pd.DataFrame({"name": syms, "delisted": [False] * n},
+                        index=pd.Index(syms, name="symbol"))
+    monkeypatch.setattr(pipeline, "make_client_from_env", lambda path: object())
+    monkeypatch.setattr(pipeline, "collect_meta", lambda client, market: meta)
+    monkeypatch.setattr(pipeline, "supplement_delisted_kr", lambda start, symbols=None: None)
+    calls = []
+
+    def fake_daily(client, market, symbol, start):
+        calls.append(symbol)
+        e = fail(symbol)
+        if e is not None:
+            raise e
+        return 0
+    monkeypatch.setattr(pipeline, "collect_daily", fake_daily)
+    return calls
+
+
+@pytest.mark.parametrize("status,code,word", [(401, "invalid-token", "credentials"),
+                                              (403, "ip-not-allowed", "ip-not-allowed")])
+def test_collect_aborts_on_auth_or_forbidden(cli_env, monkeypatch, status, code, word):
+    from autotrade.toss.client import TossApiError
+    calls = _collect_env(monkeypatch, 5, lambda s: TossApiError(status, code, "rid1")
+                         if s == "000002" else None)
+    r = CliRunner().invoke(app, ["collect", "--market", "kr", "--since", "2016-01-01"])
+    assert r.exit_code == 1 and "Traceback" not in r.output
+    assert len(r.output.strip().splitlines()) == 1
+    assert "aborted" in r.output and str(status) in r.output and word in r.output
+    assert calls == ["000001", "000002"]                  # nothing after the systemic failure
+
+
+def test_collect_aborts_after_consecutive_symbol_failures(cli_env, monkeypatch):
+    import httpx
+    calls = _collect_env(monkeypatch, 30, lambda s: httpx.ConnectError("offline"))
+    with pytest.raises(pipeline.LabError, match="20 consecutive"):
+        pipeline.collect("kr", date(2016, 1, 1))
+    assert len(calls) == pipeline.MAX_CONSECUTIVE_FAILURES == 20
+
+
+def test_collect_keeps_isolating_non_consecutive_failures(cli_env, monkeypatch):
+    from autotrade.toss.client import TossApiError
+    calls = _collect_env(monkeypatch, 60, lambda s: TossApiError(500, "internal", "r")
+                         if int(s) % 10 else None)          # 9 failures, then one success
+    s = pipeline.collect("kr", date(2016, 1, 1))
+    assert len(calls) == 60 and len(s["failed"]) == 54

@@ -1,4 +1,5 @@
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -21,10 +22,13 @@ class FakeClient:
         self.pages_requested_last_run = 0
         self.not_found = False
         self.stocks = {}
+        self.split = None            # ratio of a split: the whole adjusted series rescales
 
     def _bar(self, d, i):
         ts = pd.Timestamp(f"{d}T{self.hour:02d}:00:00{self.tz}")
         p = 100.0 + i % 50
+        if self.split is not None:
+            p /= self.split
         return {"timestamp": ts, "open": p, "high": p + 1, "low": p - 1, "close": p + 0.5,
                 "volume": 1000.0 + i}
 
@@ -76,6 +80,66 @@ def good_df(n=10):
     idx = pd.bdate_range("2024-01-02", periods=n)
     return pd.DataFrame({"open": 10.0, "high": 12.0, "low": 9.0, "close": 11.0,
                          "volume": 100.0}, index=idx)
+
+
+def test_split_between_collects_refetches_full_history(tmp_data, caplog):
+    """Reviewer probe: a 2:1 split rescales Toss' adjusted history between two collects;
+    splicing the new bars onto the old scale would fake a +100% day."""
+    c = FakeClient(first="2024-01-02", last="2025-01-31")
+    collect_daily(c, "kr", "X", start=date(2024, 1, 1))
+    c.add_new_day("2025-02-03")
+    c.add_new_day("2025-02-04")
+    c.split = 2.0                                  # 2:1 split: adjusted history halved
+    collect_daily(c, "kr", "X", start=date(2024, 1, 1))
+    df = load_daily("kr", "X")
+    assert df["close"].pct_change().abs().max() < 0.4        # no fake -50% splice bar
+    expected = pd.Series([c._bar(d, i)["close"] for i, d in enumerate(c.days)],
+                         index=pd.to_datetime(c.days))
+    assert np.allclose(df["close"].to_numpy(), expected.to_numpy())
+    assert df.index.min() == pd.Timestamp("2024-01-02")
+    assert "refetch" in caplog.text and "X" in caplog.text
+
+
+def test_unchanged_overlap_keeps_incremental_fetch(tmp_data):
+    c = FakeClient(first="2024-01-02", last="2025-01-31")
+    collect_daily(c, "kr", "X", start=date(2024, 1, 1))
+    c.add_new_day("2025-02-03")
+    assert collect_daily(c, "kr", "X", start=date(2024, 1, 1)) == 1
+    assert c.pages_requested_last_run == 1
+
+
+def test_backfill_when_start_moves_earlier(tmp_data):
+    c = FakeClient(first="2015-06-01", last="2025-01-31")
+    collect_daily(c, "kr", "X", start=date(2024, 1, 1))
+    assert load_daily("kr", "X").index.min() == pd.Timestamp("2024-01-01")
+    added = collect_daily(c, "kr", "X", start=date(2016, 1, 1))
+    df = load_daily("kr", "X")
+    assert df.index.min() == pd.Timestamp("2016-01-01")
+    assert added == len(pd.bdate_range("2016-01-01", "2023-12-29"))
+    assert df.index.is_monotonic_increasing and not df.index.duplicated().any()
+
+
+def test_history_starting_after_start_is_not_backfilled_again(tmp_data):
+    c = FakeClient(first="2020-03-02", last="2025-01-31")      # listed after start
+    collect_daily(c, "kr", "X", start=date(2016, 1, 1))
+    c.add_new_day("2025-02-03")
+    assert collect_daily(c, "kr", "X", start=date(2016, 1, 1)) == 1
+    assert c.pages_requested_last_run == 1                    # no backfill pages
+
+
+def test_save_daily_is_atomic(tmp_data, monkeypatch):
+    save_daily("kr", "A", good_df())
+    path = tmp_data / "kr" / "1d" / "A.parquet"
+
+    def boom(self, target, *a, **k):
+        Path(target).write_bytes(b"partial")                   # dies mid-write
+        raise OSError("disk full")
+    with monkeypatch.context() as m:
+        m.setattr(pd.DataFrame, "to_parquet", boom)
+        with pytest.raises(OSError):
+            save_daily("kr", "A", good_df(3))
+    assert len(load_daily("kr", "A")) == 10                   # old file intact
+    assert [f.name for f in path.parent.iterdir()] == ["A.parquet"]   # no temp leftovers
 
 
 def test_collect_paginates_until_start(fake_client, tmp_data):

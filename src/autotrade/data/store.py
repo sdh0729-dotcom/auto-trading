@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -27,15 +28,30 @@ def _meta_path(market: Market) -> Path:
     return data_root() / market / "meta.parquet"
 
 
+def write_parquet_atomic(df: pd.DataFrame, path: Path) -> None:
+    """Write to a temp file next to `path`, then os.replace: readers see the old file or the
+    complete new one, never a partial write."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    os.close(fd)
+    try:
+        df.to_parquet(tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def save_daily(market: Market, symbol: str, df: pd.DataFrame) -> None:
+    """Atomic. `df.attrs` (e.g. `history_from`, see data.collect) are stored with the file."""
     out = df.copy()
     if "source" not in out.columns:
         out["source"] = "toss"
     out = out[DAILY_COLUMNS]
     out.index = pd.DatetimeIndex(out.index, name="date")
-    path = _daily_dir(market) / f"{symbol}.parquet"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    out.to_parquet(path)
+    out.attrs = dict(df.attrs)
+    write_parquet_atomic(out, _daily_dir(market) / f"{symbol}.parquet")
 
 
 def load_daily(market: Market, symbol: str) -> pd.DataFrame | None:
@@ -46,9 +62,7 @@ def load_daily(market: Market, symbol: str) -> pd.DataFrame | None:
 
 
 def save_meta(market: Market, df: pd.DataFrame) -> None:
-    path = _meta_path(market)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path)
+    write_parquet_atomic(df, _meta_path(market))
 
 
 def load_meta(market: Market) -> pd.DataFrame:

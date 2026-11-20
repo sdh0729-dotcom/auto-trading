@@ -24,8 +24,21 @@ def _predictor(model_name: str):
     return KronosPredictor(model, tok, device="cpu", max_context=512)
 
 
-def sample_paths(history: pd.DataFrame, n_paths: int, horizon: int, model_name: str) -> np.ndarray:
+def _seed(seed: int) -> None:
+    """Seed every RNG the sampler may use (Kronos samples with torch)."""
+    np.random.seed(seed)
+    try:
+        import torch
+    except ImportError:          # the optional extra is missing: nothing else to seed
+        return
+    torch.manual_seed(seed)
+
+
+def sample_paths(history: pd.DataFrame, n_paths: int, horizon: int, model_name: str,
+                 seed: int = 0) -> np.ndarray:
+    """`n_paths` sampled close paths; the same history and seed give the same paths."""
     pred = _predictor(model_name)
+    _seed(seed)
     x = history[["open", "high", "low", "close", "volume"]].copy()
     x["amount"] = x["close"] * x["volume"]
     x_ts = pd.Series(history.index)

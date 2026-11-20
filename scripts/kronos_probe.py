@@ -2,8 +2,11 @@
 
     uv run python scripts/kronos_probe.py --market kr --symbols 10 --days 250
 
-Uses the local store; if it is empty falls back to a synthetic panel (pipeline check only,
-journaled as "synthetic — not a measurement").
+Uses the local store, but only the persisted swing train period of that market (never valid
+or sealed dates): it refuses to run on real data before `lab screen` has fixed the periods.
+Symbols are the top `--symbols` by 20-day average trading value (close x volume) at the train
+end. Sampling is seeded (kronos.SEED). If the store is empty (or too short) it falls back to a
+synthetic panel (pipeline check only, journaled as "synthetic — not a measurement").
 """
 from __future__ import annotations
 
@@ -24,18 +27,26 @@ from autotrade.rules.swing import kronos as kr  # noqa: E402
 
 HORIZON = 5
 CONTEXT = 120
+ADV_WINDOW = 20
 
 
 def get_panel(market: str, n_symbols: int, days: int):
-    from autotrade.data.store import load_panel
-    end = date.today()
-    start = end - timedelta(days=int((days + CONTEXT) * 1.6))
-    try:
+    from autotrade.data.store import load_panel, stored_symbols
+    from autotrade.pipeline import periods_path
+    from autotrade.validate.periods import load_record
+
+    panel = None
+    if stored_symbols(market):
+        rec = load_record(periods_path("swing", market))
+        if rec is None:
+            raise SystemExit(f"error: no persisted periods for swing/{market}: run `lab screen "
+                             f"--market {market}` first (the probe uses the train period only)")
+        t0, end = rec.periods.train
+        start = max(t0, end - timedelta(days=int((days + CONTEXT + HORIZON) * 1.6)))
         panel = load_panel(market, None, start, end)
-    except Exception:
-        panel = None
     if panel is not None and panel.close.shape[1] > 0 and len(panel.close) > days:
-        cols = list(panel.close.mean().sort_values(ascending=False).index[:n_symbols])
+        adv = (panel.close * panel.volume).tail(ADV_WINDOW).mean().dropna()
+        cols = list(adv.sort_values(ascending=False, kind="stable").index[:n_symbols])
         return panel, cols, False
     from tests.fixtures import make_panel
     syms = [f"SYN{i}" for i in range(n_symbols)]
@@ -70,6 +81,8 @@ def main():
     ap.add_argument("--step", type=int, default=5)
     ap.add_argument("--paths", type=int, default=4)
     a = ap.parse_args()
+    from autotrade.config import load_env
+    load_env()
     panel, cols, synthetic = get_panel(a.market, a.symbols, a.days)
     t0 = time.time()
     hits = run(panel, cols, a.days, a.step, a.paths)

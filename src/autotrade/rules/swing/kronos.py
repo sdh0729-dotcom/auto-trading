@@ -21,10 +21,11 @@ K = [2.0, 3.0]
 N_PATHS = 8
 MIN_HISTORY = 30   # ATR14 warm-up + a little context
 MAX_CONTEXT = 400  # bars passed to the model (kept cheap on CPU)
+SEED = 0           # fixed sampling seed: reruns give the same signals
 
 
-def _predict_paths(history: pd.DataFrame, n_paths: int) -> np.ndarray:
-    """Sample `n_paths` future close paths (n_paths x horizon) from Kronos on CPU.
+def _predict_paths(history: pd.DataFrame, n_paths: int, seed: int = SEED) -> np.ndarray:
+    """Sample `n_paths` future close paths (n_paths x horizon) from Kronos on CPU, seeded.
 
     `history.attrs['horizon']` is the path length; `history` has columns open/high/low/close/volume on a DatetimeIndex. Requires the `kronos`
     extra plus Kronos source on the path (vendor/kronos, see scripts/kronos_probe.py).
@@ -32,7 +33,8 @@ def _predict_paths(history: pd.DataFrame, n_paths: int) -> np.ndarray:
     from autotrade.rules.swing._kronos_model import sample_paths  # lazy: pulls in torch
 
     return sample_paths(history, n_paths, int(history.attrs["horizon"]),
-                        model_name=os.environ.get("KRONOS_MODEL", "NeoQuasar/Kronos-mini"))
+                        model_name=os.environ.get("KRONOS_MODEL", "NeoQuasar/Kronos-mini"),
+                        seed=seed)
 
 
 class KronosDaily(BaseRule):

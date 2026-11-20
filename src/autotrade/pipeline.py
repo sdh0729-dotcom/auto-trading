@@ -244,12 +244,16 @@ def _refuse_opened_overlap(pocket: str, market: str, start: date, end: date,
 
 
 def _panel(s: Setup, end: date) -> Panel:
-    """Prices from lab.history_start (signal warm-up before swing_start) through `end`."""
+    """Prices from lab.history_start (signal warm-up before swing_start) through `end`; its
+    `calendar` (trading dates only) is cut at the period record's data cutoff, so dates
+    collected later never change what a screen / validate / verify run computes."""
     p = load_panel(s.market.market, None, s.lab.history_start, end)
     idx = p.close.index
     if not idx[idx >= pd.Timestamp(s.lab.swing_start)].equals(
             s.calendar[s.calendar <= pd.Timestamp(end)]):
         raise LabError("stored data changed while running; re-run the command")
+    if p.calendar is not None:
+        p = replace(p, calendar=p.calendar[p.calendar <= pd.Timestamp(s.record.data_cutoff)])
     return p
 
 

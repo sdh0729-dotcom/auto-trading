@@ -1091,3 +1091,25 @@ def test_rebuild_refuses_a_logged_cycle_it_cannot_reproduce(cli_env):
                                  "--family", "breakout"])
     assert r.exit_code == 1 and "cycle 2" in r.output and "Traceback" not in r.output
     assert not periods_file(cli_env).exists()
+
+
+def test_collecting_past_the_cutoff_does_not_change_sealed_run_signals(cli_env):
+    from autotrade.rules.swing.tom import Tom
+    n = len(pd.bdate_range("2016-01-04", "2019-08-30"))     # cutoff Fri 2019-08-30: August's
+    p = make_panel(n, SYMBOLS, seed=2, products={s: "etf" for s in SYMBOLS})  # last trading
+    for sym in SYMBOLS:                                       # day, not its last calendar day
+        df = pd.DataFrame({c: getattr(p, c)[sym] * (SCALE if c != "volume" else 1)
+                           for c in ("open", "high", "low", "close", "volume")})
+        store.save_daily("kr", sym, df)
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "tom"])
+
+    def sealed_run():
+        s = pipeline._setup("swing", "kr")
+        assert s.record.data_cutoff == date(2019, 8, 30)
+        panel = pipeline._panel(s, s.periods.sealed[1])
+        assert panel.calendar.max() <= pd.Timestamp(s.record.data_cutoff)
+        rule = Tom({"n": 2, "m": 3, "k": 2.0})
+        return rule.signals(panel, eligible=pipeline._eligible(s, panel, "paper")).entries
+    first = sealed_run()
+    extend_store(10)                                   # a later collect: September bars
+    pd.testing.assert_frame_equal(sealed_run(), first)

@@ -24,6 +24,10 @@ MAX_ATTEMPTS = 5
 CANDLE_COLS = ["timestamp", "open", "high", "low", "close", "volume"]
 
 
+def _backoff(attempt: int) -> int:
+    return 2 ** (attempt - 1)
+
+
 @dataclass
 class CandlePage:
     df: pd.DataFrame
@@ -40,17 +44,35 @@ class TossClient:
 
     def _get(self, path: str, group: str, params: dict | None = None,
              headers: dict | None = None):
+        """GET with retries: 429 waits Retry-After, 5xx and timeouts back off 1, 2, 4, 8 s
+        (at most MAX_ATTEMPTS calls); a 401 drops the cached token and retries once."""
+        reauthed = False
         for attempt in range(1, MAX_ATTEMPTS + 1):
+            last = attempt == MAX_ATTEMPTS
             self._limiter.acquire(group)
-            resp = self._http.get(
-                f"{BASE}{path}", params=params,
-                headers={"Authorization": f"Bearer {self._auth.token()}", **(headers or {})})
-            if resp.status_code == 429 and attempt < MAX_ATTEMPTS:
+            token = self._auth.token()
+            try:
+                resp = self._http.get(
+                    f"{BASE}{path}", params=params,
+                    headers={"Authorization": f"Bearer {token}", **(headers or {})})
+            except httpx.TimeoutException:
+                if last:
+                    raise
+                time.sleep(_backoff(attempt))
+                continue
+            if resp.status_code == 429 and not last:
                 try:
                     wait = float(resp.headers.get("Retry-After", 1))
                 except ValueError:
                     wait = 1.0
                 time.sleep(int(wait) if wait == int(wait) else wait)
+                continue
+            if resp.status_code >= 500 and not last:
+                time.sleep(_backoff(attempt))
+                continue
+            if resp.status_code == 401 and not reauthed and not last:
+                reauthed = True
+                self._auth.invalidate(token)
                 continue
             if resp.status_code != 200:
                 raise parse_error(resp)

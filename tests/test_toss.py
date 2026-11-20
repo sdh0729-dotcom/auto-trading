@@ -204,3 +204,78 @@ def test_rate_table_pinned():
     from autotrade.toss.client import RATES
     assert RATES == {"MARKET_DATA_CHART": 20, "MARKET_DATA": 15, "STOCK_ALL": 1, "STOCK": 5,
                      "ORDER_INFO": 6, "MARKET_INFO": 3, "AUTH": 5}
+
+
+def test_5xx_retried_with_exponential_backoff(respx_mock, client, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("time.sleep", sleeps.append)
+    route = respx_mock.get(f"{BASE}/api/v1/candles").mock(side_effect=[
+        httpx.Response(500, json={}), httpx.Response(502, json={}),
+        httpx.Response(503, json={}), httpx.Response(200, json=OK_EMPTY)])
+    assert client.get_candles("005930", "1d").df.empty
+    assert route.call_count == 4 and sleeps == [1, 2, 4]
+
+
+def test_5xx_gives_up_after_5(respx_mock, client, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    route = respx_mock.get(f"{BASE}/api/v1/candles").respond(500, json={})
+    with pytest.raises(TossApiError) as e:
+        client.get_candles("005930", "1d")
+    assert e.value.status == 500 and route.call_count == 5
+
+
+def test_timeouts_retried_then_raised(respx_mock, client, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("time.sleep", sleeps.append)
+    respx_mock.get(f"{BASE}/api/v1/candles").mock(side_effect=[
+        httpx.ReadTimeout("slow"), httpx.Response(200, json=OK_EMPTY)])
+    assert client.get_candles("005930", "1d").df.empty and sleeps == [1]
+    route = respx_mock.get(f"{BASE}/api/v1/exchange-rate").mock(
+        side_effect=httpx.ConnectTimeout("down"))
+    with pytest.raises(httpx.TimeoutException):
+        client.get_exchange_rate()
+    assert route.call_count == 5
+
+
+def test_401_drops_token_cache_and_refetches_once(tmp_path, respx_mock):
+    tokens = respx_mock.post(f"{BASE}/oauth2/token").mock(side_effect=[
+        httpx.Response(200, json={"access_token": "t1", "expires_in": 86400}),
+        httpx.Response(200, json={"access_token": "t2", "expires_in": 86400})])
+    seen = []
+
+    def candles(request):
+        seen.append(request.headers["Authorization"])
+        if request.headers["Authorization"] == "Bearer t1":
+            return httpx.Response(401, json={"error": {"code": "invalid-token"}})
+        return httpx.Response(200, json=OK_EMPTY)
+    respx_mock.get(f"{BASE}/api/v1/candles").mock(side_effect=candles)
+    http = httpx.Client()
+    path = tmp_path / "t.json"
+    c = TossClient(TossAuth("id", "sec", path, http), http,
+                   RateLimiter({"MARKET_DATA_CHART": 1e6}))
+    assert c.get_candles("005930", "1d").df.empty
+    assert seen == ["Bearer t1", "Bearer t2"] and tokens.call_count == 2
+    assert json.loads(path.read_text())["access_token"] == "t2"
+
+
+def test_401_twice_raises(tmp_path, respx_mock):
+    respx_mock.post(f"{BASE}/oauth2/token").respond(
+        json={"access_token": "t", "expires_in": 86400})
+    route = respx_mock.get(f"{BASE}/api/v1/candles").respond(
+        401, json={"error": {"code": "invalid-token"}})
+    http = httpx.Client()
+    c = TossClient(TossAuth("id", "sec", tmp_path / "t.json", http), http,
+                   RateLimiter({"MARKET_DATA_CHART": 1e6}))
+    with pytest.raises(TossApiError) as e:
+        c.get_candles("005930", "1d")
+    assert e.value.status == 401 and route.call_count == 2
+
+
+def test_401_keeps_a_newer_token_from_another_process(tmp_path, respx_mock):
+    path = tmp_path / "t.json"
+    auth = TossAuth("id", "sec", path, httpx.Client())
+    path.write_text(json.dumps({"access_token": "newer", "expires_at": time.time() + 3600}))
+    auth.invalidate("stale")                    # not the cached token -> cache kept
+    assert json.loads(path.read_text())["access_token"] == "newer"
+    auth.invalidate("newer")
+    assert not path.exists()

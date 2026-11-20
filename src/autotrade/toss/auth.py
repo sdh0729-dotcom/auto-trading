@@ -64,6 +64,16 @@ class TossAuth:
                 pass
             raise
 
+    def invalidate(self, token: str) -> None:
+        """Forget `token` after the API rejected it (401). The cache is removed only when it
+        still holds that token: a newer one written by another process is kept."""
+        try:
+            if json.loads(self._path.read_text()).get("access_token") != token:
+                return
+        except (OSError, ValueError, AttributeError):
+            pass
+        self._path.unlink(missing_ok=True)
+
     def token(self) -> str:
         cached = self._read_cache()
         if cached:

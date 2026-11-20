@@ -305,6 +305,35 @@ def test_collect_wiring_limit_and_quality_summary(cli_env, monkeypatch):
     assert "clean 1" in r.output and "issues 1" in r.output and "missing 1" in r.output
 
 
+def test_collect_isolates_failing_symbols(cli_env, monkeypatch):
+    import httpx
+    from autotrade.toss.client import TossApiError
+    meta = pd.DataFrame({"name": ["X", "Y", "Z"], "delisted": [False] * 3},
+                        index=pd.Index(["000010", "000020", "000030"], name="symbol"))
+    monkeypatch.setattr(pipeline, "make_client_from_env", lambda path: object())
+    monkeypatch.setattr(pipeline, "collect_meta", lambda client, market: meta)
+    done = []
+
+    def fake_daily(client, market, symbol, start):
+        if symbol == "000010":
+            raise TossApiError(500, "internal", "r9")
+        if symbol == "000020":
+            raise httpx.ReadTimeout("slow")
+        df = pd.DataFrame({"open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0,
+                           "volume": 1.0}, index=pd.to_datetime(["2016-01-04"]))
+        store.save_daily(market, symbol, df)
+        done.append(symbol)
+        return 1
+    monkeypatch.setattr(pipeline, "collect_daily", fake_daily)
+    monkeypatch.setattr(pipeline, "supplement_delisted_kr", lambda start, symbols=None: None)
+    s = pipeline.collect("kr", date(2016, 1, 1))
+    assert done == ["000030"]
+    assert [f.split(":")[0] for f in s["failed"]] == ["000010", "000020"]
+    assert "TossApiError" in s["failed"][0] and "ReadTimeout" in s["failed"][1]
+    r = run(["collect", "--market", "kr", "--since", "2016-01-01"])
+    assert "failed 2 (000010, 000020)" in r.output
+
+
 def test_collect_reports_dropped_calendar_dates(cli_env, monkeypatch):
     meta = pd.DataFrame({"name": ["X"], "delisted": [False]},
                         index=pd.Index(["000010"], name="symbol"))

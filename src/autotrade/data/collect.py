@@ -24,6 +24,10 @@ REL_TOL = 1e-6
 HISTORY_FROM = "history_from"
 
 
+class PaginationError(Exception):
+    """The candles API returned a `nextBefore` that does not move strictly back in time."""
+
+
 def _to_local_dates(ts: pd.Series, market: Market) -> pd.DatetimeIndex:
     """Trading date in the market's local calendar (tz-naive, midnight)."""
     local = pd.DatetimeIndex(ts).tz_convert(TZ[market])
@@ -76,6 +80,9 @@ def _fetch(client: TossClient, market: Market, symbol: str, stop_at: pd.Timestam
         if page.next_before is None:
             complete = True
             break
+        if before is not None and page.next_before >= before:
+            raise PaginationError(f"{market} {symbol}: nextBefore {page.next_before} is not "
+                                  f"before the previous cursor {before}")
         before = page.next_before
     if not pages:
         return None, complete

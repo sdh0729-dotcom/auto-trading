@@ -332,3 +332,32 @@ def test_calendar_keeps_dates_with_half_of_active_symbols(tmp_data):
     save_daily("kr", "B", b)                                   # B misses day 2: 1 of 2 = 50%
     kept, dropped = calendar("kr")
     assert list(kept) == list(a.index) and dropped.empty
+
+
+def test_pagination_guard_stops_non_decreasing_before(tmp_data):
+    from autotrade.data.collect import PaginationError
+
+    class Stuck(FakeClient):
+        def get_candles(self, symbol, interval, before=None, count=200, adjusted=True):
+            page = super().get_candles(symbol, interval, before, count, adjusted)
+            if before is not None:                       # API repeats the same cursor
+                return CandlePage(page.df, before)
+            return page
+    with pytest.raises(PaginationError):
+        collect_daily(Stuck(), "kr", "X", start=date(2016, 1, 1))
+    assert load_daily("kr", "X") is None
+
+
+def test_save_meta_is_atomic(tmp_data, monkeypatch):
+    meta = pd.DataFrame({"name": ["a"]}, index=pd.Index(["A"], name="symbol"))
+    save_meta("kr", meta)
+
+    def boom(self, target, *a, **k):
+        Path(target).write_bytes(b"partial")
+        raise OSError("disk full")
+    with monkeypatch.context() as m:
+        m.setattr(pd.DataFrame, "to_parquet", boom)
+        with pytest.raises(OSError):
+            save_meta("kr", meta.assign(name="b"))
+    assert load_meta("kr").equals(meta)
+    assert [f.name for f in (tmp_data / "kr").iterdir()] == ["meta.parquet"]

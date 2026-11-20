@@ -69,6 +69,10 @@ def collect(market: str = typer.Option(..., help="kr | us"),
     s = pipeline.collect(market, _date(since), limit)
     line = (f"symbols {s['symbols']}, rows added {s['rows_added']} | clean {s['clean']}, "
             f"issues {s['issues']}, warnings {s['warnings']}, missing {s['missing']}")
+    failed = [f.split(":")[0] for f in s.get("failed", [])]
+    if failed:
+        shown = ", ".join(failed[:10]) + (", ..." if len(failed) > 10 else "")
+        line += f" | failed {len(failed)} ({shown})"
     dropped = s.get("calendar_dropped", [])
     if dropped:
         shown = ", ".join(dropped[:10]) + (", ..." if len(dropped) > 10 else "")

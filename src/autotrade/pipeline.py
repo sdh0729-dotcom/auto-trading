@@ -10,6 +10,7 @@ to the period itself.
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 from dataclasses import dataclass
@@ -54,6 +55,9 @@ MAX_COMMISSION = 0.01            # a commission ratio >= 1% is almost surely a p
 PARITY_MISMATCHES_KEPT = 20
 FAMILIES = {"swing": SWING_FAMILIES}
 VERDICT_PAPER, VERDICT_REAL = "② 모의 자격", "실돈 자격"
+
+
+log = logging.getLogger(__name__)
 
 
 class LabError(Exception):
@@ -244,9 +248,13 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
         delisted = set(str(s) for s in meta.index[meta["delisted"].astype(bool)])
         via_pykrx = [s for s in ordered if s in delisted] if mc.delisted_supplement else []
         via_toss = [s for s in ordered if s not in set(via_pykrx)]
-        added = 0
-        for sym in via_toss:
-            added += collect_daily(client, market, sym, start)
+        added, failed = 0, []
+        for sym in via_toss:            # one failing symbol is reported, the run continues
+            try:
+                added += collect_daily(client, market, sym, start)
+            except Exception as e:      # noqa: BLE001 - messages carry no secrets
+                log.warning("collect %s %s failed: %s: %s", market, sym, type(e).__name__, e)
+                failed.append(f"{sym}: {type(e).__name__}: {e}")
     except TossApiError as e:
         raise LabError(f"collect failed: {e}") from e
     except httpx.HTTPError as e:
@@ -255,7 +263,7 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
     if via_pykrx:
         supplement = supplement_delisted_kr(start, symbols=via_pykrx)
     summary = {"symbols": len(ordered), "rows_added": added, "clean": 0, "issues": 0,
-               "warnings": 0, "missing": 0}
+               "warnings": 0, "missing": 0, "failed": failed}
     for sym in ordered:
         df = load_daily(market, sym)
         if df is None or df.empty:

@@ -199,3 +199,24 @@ def test_parity_breakout_with_binding_max_positions():
     assert np.allclose(naut["net_pnl"].sum(), ours["net_pnl"].sum(), rtol=0.01)
     assert (naut["exit_reason"].values == ours["exit_reason"].values).mean() >= 0.95
     assert parity_report(ours, naut)["matched_share"] == 1.0
+
+
+def test_close_entry_followed_by_missing_bar():
+    p = flat_panel(["A", "B"])
+    for f in (p.open, p.high, p.low, p.close):
+        f.iloc[4:8, 0] = np.nan                                # A: no prices rows 4..7
+    one_slot = replace(SWING, max_positions=1)
+    rule = FixedRule(entries={"A": [3], "B": [10]}, exits={"A": [20], "B": [15]},
+                     conf={"A": 0.9, "B": 0.5})
+    elig = all_true_mask(p)
+    s, e = p.close.index[0].date(), p.close.index[-1].date()
+    ours = run_portfolio(simulate(p, rule.signals(p), elig, s, e), p, CM, one_slot,
+                         5_000_000, 1.0, False, **timing(rule, p)).fills
+    naut = run_nautilus(rule, p, elig, s, e, CM, one_slot, 5_000_000, 1.0, False)
+    d = p.close.index
+    expected = [("A", d[3], d[3], "period_end"), ("B", d[10], d[15], "signal")]
+    for df in (ours, naut):
+        assert list(zip(df["symbol"], df["entry_date"], df["exit_date"],
+                        df["exit_reason"])) == expected
+    rep = parity_report(ours, naut)
+    assert rep["matched_share"] == 1.0 and rep["mismatches"] == []

@@ -172,6 +172,22 @@ def test_open_entry_stopped_out_same_day_is_closed():
     assert res.equity.iloc[-1] == pytest.approx(1_000_000 + res.fills["net_pnl"].iloc[0])
 
 
+def test_close_entry_with_same_day_period_end_is_closed():
+    # simulate emits exit_date == entry_date when the bar after a close entry is missing
+    pocket = replace(POCKET, max_positions=1)
+    p = panel({"A": 100.0, "B": 100.0})
+    res = run([cand("A", 3, 3, reason="period_end"), cand("B", 5, 8)], p, pocket=pocket,
+              entry_at="close", exit_at="close")
+    assert set(res.fills["symbol"]) == {"A", "B"} and res.skipped.empty
+    assert res.equity.iloc[-1] == pytest.approx(1_000_000 + res.fills["net_pnl"].sum())
+
+
+def test_position_never_closed_raises():
+    p = panel({"A": 100.0, "B": 100.0})
+    with pytest.raises(ValueError, match="never closed"):
+        run([cand("B", 0, 10), cand("A", 5, 3)], p)           # exit before entry
+
+
 def test_cash_shortage_skips():
     pocket = replace(POCKET, max_position_weight=0.4)       # 3 x 40% > 100%
     syms = list("ABC")

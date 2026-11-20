@@ -898,3 +898,82 @@ def test_cycle_two_verify_keeps_the_cycle_one_card(cli_env, monkeypatch):
     board = pipeline.report("swing", "kr").read_text(encoding="utf-8")
     assert f"rule-cards/swing-kr-c1-{stem}.md" in board
     assert f"rule-cards/swing-kr-c2-{stem}.md" in board
+
+
+# ---------------------------------------------------------------- P5: signal warm-up history
+SWING_START = pd.Timestamp("2016-01-01")
+
+
+def write_with_warmup() -> None:
+    """1300 business days from 2014-06-02 (before swing_start - 400 days); 069500 (always
+    included) trends up with a 10-day wave, so a 10/200 MA pullback rule enters about every
+    10 days once its SMA200 exists."""
+    p = make_panel(1300, SYMBOLS, seed=2, products={s: "etf" for s in SYMBOLS},
+                   start="2014-06-02")
+    t = np.arange(1300)
+    wave = 8000 * np.exp(0.0015 * t) * (1 + 0.03 * np.sin(2 * np.pi * t / 10))
+    for sym in SYMBOLS:
+        c = wave if sym == "069500" else p.close[sym].to_numpy() * SCALE
+        o = c if sym == "069500" else p.open[sym].to_numpy() * SCALE
+        df = pd.DataFrame({"open": o, "high": np.maximum(o, c) * 1.005,
+                           "low": np.minimum(o, c) * 0.995, "close": c,
+                           "volume": p.volume[sym].to_numpy()}, index=p.close.index)
+        df["source"] = "synthetic"
+        store.save_daily("kr", sym, df)
+    store.save_meta("kr", p.meta)
+
+
+def test_lab_config_has_warmup_days():
+    from autotrade.config import load_lab
+    lab = load_lab()
+    assert lab.warmup_days == 400
+    assert lab.history_start == date(2014, 11, 27)        # 2016-01-01 - 400 calendar days
+
+
+def test_collect_fetches_the_warmup_history(cli_env, monkeypatch):
+    meta = pd.DataFrame({"name": ["X", "D"], "delisted": [False, True]},
+                        index=pd.Index(["000010", "000040"], name="symbol"))
+    starts = {}
+    monkeypatch.setattr(pipeline, "make_client_from_env", lambda path: object())
+    monkeypatch.setattr(pipeline, "collect_meta", lambda client, market: meta)
+
+    def fake_daily(client, market, symbol, start):
+        starts["toss"] = start
+        return 0
+
+    def fake_supplement(start, symbols=None):
+        from autotrade.data.delisted_kr import SupplementReport
+        starts["pykrx"] = start
+        return SupplementReport()
+    monkeypatch.setattr(pipeline, "collect_daily", fake_daily)
+    monkeypatch.setattr(pipeline, "supplement_delisted_kr", fake_supplement)
+    pipeline.collect("kr")
+    assert starts == {"toss": date(2014, 11, 27), "pykrx": date(2014, 11, 27)}
+    pipeline.collect("kr", since=date(2020, 1, 1))         # an explicit --since is kept
+    assert starts == {"toss": date(2020, 1, 1), "pykrx": date(2020, 1, 1)}
+
+
+def test_sma200_rule_enters_right_after_swing_start_with_no_trade_or_stat_before(cli_env):
+    from autotrade.rules.swing.ma_trend import MaTrend
+    write_with_warmup()
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "ma_trend"])
+    s = pipeline._setup("swing", "kr")
+    t0, t1 = s.periods.train
+    cal = s.calendar
+    assert pd.Timestamp(t0) == cal[0] and cal[0] >= SWING_START    # split from swing_start
+    panel = pipeline._panel(s, t1)
+    assert panel.close.index[0] < SWING_START                    # warm-up history loaded ...
+    assert panel.close.index[0] >= pd.Timestamp("2014-11-27")    # ... from history_start
+    elig = pipeline._eligible(s, panel, "paper")
+    assert not elig[elig.index < SWING_START].to_numpy().any()   # no universe before start
+    # universe statistics start at swing_start: a ranked (not always-included) symbol is
+    # eligible only once adv_window days from swing_start exist
+    first_ranked = elig["A01"][elig["A01"]].index.min()
+    assert first_ranked >= cal[s.lab.adv_window]
+    sig = MaTrend({"s": 10, "l": 200, "k": 2.0}).signals(panel, eligible=elig)
+    trades = pipeline.simulate(panel, sig, elig, t0, t1)
+    assert len(trades) and trades["entry_date"].min() >= SWING_START
+    assert trades["entry_date"].min() <= cal[30]                 # not ~200 days later
+    assert (trades["exit_date"] >= SWING_START).all()
+    rows = ExperimentLog(cli_env.research / "experiments.jsonl").rows("swing", "kr")
+    assert all(pd.Timestamp(p[0]) >= SWING_START for p in rows["period"])

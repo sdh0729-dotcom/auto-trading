@@ -1,5 +1,8 @@
 split: [0.6, 0.2, 0.2]
 swing_start: 2016-01-01
+# calendar days of price history before swing_start that collect fetches and signals use
+# as warm-up (e.g. SMA200); periods, universe statistics and trades start at swing_start
+warmup_days: 400
 capital: {real: 50000, paper: 5000000}
 universe_top_n: 200
 adv_window: 20

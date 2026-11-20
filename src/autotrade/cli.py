@@ -75,7 +75,7 @@ def sync(kr_commission: Optional[float] = typer.Option(
 @app.command()
 @_expected_errors
 def collect(market: str = typer.Option(..., help="kr | us"),
-            since: Optional[str] = typer.Option(None, help="YYYY-MM-DD (default swing_start)"),
+            since: Optional[str] = typer.Option(None, help="YYYY-MM-DD (default swing_start - warmup_days)"),
             limit: Optional[int] = typer.Option(None, help="first N symbols only")):
     """Instrument meta -> incremental daily bars -> (kr) delisted supplement -> quality."""
     s = pipeline.collect(market, _date(since), limit)

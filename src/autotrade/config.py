@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import yaml
@@ -121,6 +121,12 @@ class LabConfig:
     universe_top_n: int
     adv_window: int
     criteria: Criteria
+    warmup_days: int = 0     # calendar days of signal warm-up history before swing_start
+
+    @property
+    def history_start(self) -> date:
+        """First date collected / loaded for signals: swing_start - warmup_days."""
+        return self.swing_start - timedelta(days=self.warmup_days)
 
 
 @dataclass(frozen=True)
@@ -166,16 +172,20 @@ def load_pocket(p: Pocket) -> PocketConfig:
 def load_lab() -> LabConfig:
     d = _read(_config_root() / "lab.yaml")
     try:
-        return LabConfig(
+        lab = LabConfig(
             split=tuple(d["split"]),
             swing_start=d["swing_start"],
             capital=dict(d["capital"]),
             universe_top_n=d["universe_top_n"],
             adv_window=d["adv_window"],
             criteria=Criteria(**d["criteria"]),
+            warmup_days=int(d.get("warmup_days", 0)),
         )
-    except (KeyError, TypeError) as e:
+    except (KeyError, TypeError, ValueError) as e:
         raise ConfigError(f"invalid lab config: {e}") from e
+    if lab.warmup_days < 0:
+        raise ConfigError(f"invalid lab config: warmup_days must be >= 0, got {lab.warmup_days}")
+    return lab
 
 
 def load_synced() -> SyncedValues:

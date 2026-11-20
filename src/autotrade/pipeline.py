@@ -8,15 +8,17 @@ passed; a lost file is rebuilt from the seal tickets, not re-split. Every later 
 file, so later collects never move a boundary (`lab periods --new-cycle` starts a
 re-validation cycle, spec 7.9). `screen` loads prices only through the train end, `validate`
 only through the valid end, and both refuse ranges overlapping an already-opened sealed
-period; the sealed prices are loaded by `verify_final` after it has opened the seal ticket. Signals are always computed on the panel history through the end of the
-period being evaluated (warm-up), while simulate / run_portfolio / run_nautilus are limited
-to the period itself.
+period; the sealed prices are loaded by `verify_final` after it has opened the seal ticket.
+Signals are always computed on the panel history from `lab.history_start` (swing_start -
+warmup_days) through the end of the period being evaluated (warm-up), while the universe
+statistics start at swing_start (no symbol is eligible before it) and simulate /
+run_portfolio / run_nautilus are limited to the period itself.
 """
 from __future__ import annotations
 
 import logging
-import os
 import math
+import os
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -215,10 +217,22 @@ def _refuse_opened_overlap(pocket: str, market: str, start: date, end: date,
 
 
 def _panel(s: Setup, end: date) -> Panel:
-    p = load_panel(s.market.market, None, s.lab.swing_start, end)
-    if not p.close.index.equals(s.calendar[s.calendar <= pd.Timestamp(end)]):
+    """Prices from lab.history_start (signal warm-up before swing_start) through `end`."""
+    p = load_panel(s.market.market, None, s.lab.history_start, end)
+    idx = p.close.index
+    if not idx[idx >= pd.Timestamp(s.lab.swing_start)].equals(
+            s.calendar[s.calendar <= pd.Timestamp(end)]):
         raise LabError("stored data changed while running; re-run the command")
     return p
+
+
+def _eligible(s: Setup, panel: Panel, scenario: str) -> pd.DataFrame:
+    """Universe mask on the panel's index: statistics over [swing_start, ...] only, so the
+    warm-up rows (before swing_start) are never eligible and feed no universe window."""
+    idx = panel.close.index
+    lab_panel = panel.slice(s.lab.swing_start, idx.max()) if len(idx) else panel
+    mask = eligible_mask(lab_panel, s.market, s.pocket, s.lab, scenario, s.synced.usd_krw)
+    return mask.reindex(index=idx, columns=panel.close.columns, fill_value=False).astype(bool)
 
 
 def _cost_model(market: MarketConfig, meta: pd.DataFrame) -> CostModel:
@@ -363,7 +377,7 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
     as partial (screen / validate / verify --final refuse it) until a full collect."""
     _check_market(market)
     mc = load_market_raw(market)
-    start = since or load_lab().swing_start
+    start = since or load_lab().history_start      # swing_start - warmup_days
     client = _client()
     try:
         meta = collect_meta(client, market)
@@ -457,7 +471,7 @@ def screen(pocket: str, market: str, family: str = "all") -> pd.DataFrame:
     t0, t1 = s.periods.train
     _refuse_opened_overlap(pocket, market, t0, t1, "screen")
     panel = _panel(s, t1)
-    elig = eligible_mask(panel, s.market, s.pocket, s.lab, "paper", s.synced.usd_krw)
+    elig = _eligible(s, panel, "paper")
     cm = _cost_model(s.market, panel.meta)
     log = ExperimentLog(experiments_path())
     frames = []
@@ -528,7 +542,7 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     _refuse_opened_overlap(pocket, market, t0, v1, "validate")
     panel = _panel(s, v1)
     cal = panel.close.index
-    elig = eligible_mask(panel, s.market, s.pocket, s.lab, "paper", s.synced.usd_krw)
+    elig = _eligible(s, panel, "paper")
     cm = _cost_model(s.market, panel.meta)
     cpk = _currency_per_krw(s.market, s.synced)
     capital = s.lab.capital["paper"]
@@ -664,7 +678,7 @@ def _final_scenarios(rule, panel: Panel, s: Setup, pbo: float, n_trials: int,
         capital = s.lab.capital[scen]
         cap0 = capital * cpk
         frac = s.market.fractional_orders if scen == "real" else False
-        elig = eligible_mask(panel, s.market, s.pocket, s.lab, scen, s.synced.usd_krw)
+        elig = _eligible(s, panel, scen)
         velig = elig.loc[elig.index <= pd.Timestamp(v1)]
         sig = rule.signals(panel, eligible=elig)             # history through sealed end
         vsig = rule.signals(vpanel, eligible=velig)          # history through valid end

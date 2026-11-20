@@ -47,6 +47,11 @@ def test_limitations_per_market_and_family():
     assert any("보충" in x for x in kr)          # KR: pykrx supplement
     assert any("생존 편향" in x for x in us)     # US: delisted not included
     assert not any("1박" in x for x in kr)
+    # I3: KR daily bars are KRX+NXT combined; I7: US fractional-order limits not modelled
+    assert any("KRX+NXT" in x and "정규장" in x for x in kr)
+    assert not any("KRX+NXT" in x for x in us)
+    assert any("소수점 주문 제약" in x and "계획 2" in x for x in us)
+    assert not any("소수점 주문 제약" in x for x in kr)
     assert any("1박" in x for x in limitations(load_market_raw("kr"), family="overnight"))
 
 
@@ -86,3 +91,17 @@ def test_leaderboard_lists_families_and_failure_reasons(tmp_path):
     assert "검증 순수익 ≤ 0" in text                          # validate drop reason
     assert "검증 기간 구간 안정성" in text                    # I6 label
     assert "NBBO" in text and "상장폐지" in text              # fixed limitations
+
+
+def test_card_labels_currency_of_capital_and_pnl(tmp_path):
+    from dataclasses import replace
+    card = replace(sample_card(), market="us", currency="USD", scenarios={
+        "paper": {"capital_krw": 5_000_000, "capital_ccy": 3623.19, "currency": "USD",
+                  "passed": False, "failed": ["dsr"],
+                  "metrics": {"sealed_net_pnl": 12.5, "valid_net_pnl": 3.0}}},
+        metrics_by_stage={"validate": {"valid_net_pnl": 3.0, "capital_krw": 5_000_000}})
+    md, js = write_rule_card(card, tmp_path)
+    text = md.read_text(encoding="utf-8")
+    assert "sealed_net_pnl (USD)" in text and "valid_net_pnl (USD)" in text
+    assert "capital_krw (KRW)" in text and "capital_ccy (USD)" in text
+    assert json.loads(js.read_text(encoding="utf-8"))["currency"] == "USD"

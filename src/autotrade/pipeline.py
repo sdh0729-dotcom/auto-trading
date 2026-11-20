@@ -60,6 +60,9 @@ MAX_COMMISSION = 0.01            # a commission ratio >= 1% is almost surely a p
 PARITY_MISMATCHES_KEPT = 20
 FAMILIES = {"swing": SWING_FAMILIES}
 VERDICT_PAPER, VERDICT_REAL = "② 모의 자격", "실돈 자격"
+# US real money: fractional-order limits (amount orders, exit 1 h before the close, no
+# server-side stop) are not modelled yet -> reference only until plan 2 (spec 5)
+VERDICT_REAL_US = "참고용(계획 2에서 확정)"
 
 
 log = logging.getLogger(__name__)
@@ -471,7 +474,8 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
             "valid_net_pnl": float(res.fills["net_pnl"].astype(float).sum()),
             "valid_daily_sharpe": sharpe(rets.to_numpy(), periods_per_year=1),
             "valid_sharpe_annual": sharpe(rets.to_numpy()),
-            "valid_mdd": max_drawdown(eq), "scenario": "paper", "capital": capital,
+            "valid_mdd": max_drawdown(eq), "scenario": "paper", "capital_krw": capital,
+            "capital_ccy": capital * cpk, "currency": s.market.currency,
         }
     pbo = _pbo(pd.DataFrame(returns).fillna(0.0))
     ranked = sorted((rid for rid in top_ids if metrics[rid]["valid_net_pnl"] > 0),
@@ -589,7 +593,8 @@ def _final_scenarios(rule, panel: Panel, s: Setup, pbo: float, n_trials: int,
         cost_r = [cm.round_trip_cost_pct(sym, px) / sp for sym, px, sp in
                   zip(naut["symbol"], naut["entry_price"], naut["stop_pct"])]
         scenarios[scen] = {
-            "capital": capital, "currency": s.market.currency, "currency_per_krw": cpk,
+            "capital_krw": capital, "capital_ccy": cap0, "currency": s.market.currency,
+            "currency_per_krw": cpk,
             "fractional": frac, "passed": v.passed, "failed": list(v.failed),
             "sr_var_trials_source": var_src,
             "mean_cost_r": float(np.mean(cost_r)) if cost_r else math.nan,
@@ -641,8 +646,9 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
         raise LabError("sealed slice does not match the period split")
 
     scenarios, parity = _final_scenarios(rule, panel, s, pbo, n_trials, sr_var)
+    real_label = VERDICT_REAL_US if market == "us" else VERDICT_REAL
     verdict = {VERDICT_PAPER: scenarios["paper"]["passed"],
-               VERDICT_REAL: scenarios["paper"]["passed"] and scenarios["real"]["passed"]}
+               real_label: scenarios["paper"]["passed"] and scenarios["real"]["passed"]}
     final_metrics = {scen: {"passed": d["passed"], "failed": d["failed"], **d["metrics"],
                             "sr_var_trials_source": d["sr_var_trials_source"]}
                      for scen, d in scenarios.items()}
@@ -658,7 +664,7 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
         metrics_by_stage={"screen": scr.iloc[-1]["metrics"], "validate": vrow["metrics"]},
         scenarios=scenarios, verdict=verdict, parity=parity,
         limitations=limitations(s.market, family=family),
-        validate_runs=s.record.validate_runs)
+        validate_runs=s.record.validate_runs, currency=s.market.currency)
     md, js = write_rule_card(card, cards_dir())
     return card, md, js
 

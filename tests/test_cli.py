@@ -112,8 +112,10 @@ def test_cli_end_to_end_on_synthetic(cli_env):
     card = json.loads(cards[0].read_text(encoding="utf-8"))
     assert card["rule_id"] == rid
     assert card["scenarios"].keys() == {"paper", "real"}
-    assert card["scenarios"]["paper"]["capital"] == 5_000_000
-    assert card["scenarios"]["real"]["capital"] == 50_000
+    assert card["scenarios"]["paper"]["capital_krw"] == 5_000_000
+    assert card["scenarios"]["real"]["capital_krw"] == 50_000
+    assert card["scenarios"]["real"]["capital_ccy"] == 50_000
+    assert card["scenarios"]["real"]["currency"] == "KRW" and card["currency"] == "KRW"
     assert set(card["verdict"]) >= {"② 모의 자격", "실돈 자격"}
     assert card["parity"]["paper"]["matched_share"] == 1.0
     per = periods_of(cli_env)
@@ -412,7 +414,7 @@ def test_verify_scenarios_wiring_us(cli_env, monkeypatch):
         return real_portfolio(cands, panel, cm, pocket, capital, cpk, fractional, **kw)
     monkeypatch.setattr(pipeline, "run_nautilus", fake_nautilus)
     monkeypatch.setattr(pipeline, "run_portfolio", spy_portfolio)
-    card, _, _ = pipeline.verify_final("swing", "us", rid)
+    card, _md, _ = pipeline.verify_final("swing", "us", rid)
 
     per = periods_of(cli_env)
     cpk = 1 / 1380.0
@@ -426,6 +428,15 @@ def test_verify_scenarios_wiring_us(cli_env, monkeypatch):
     assert all(c[3] == timing for c in port_calls)
     assert card.scenarios["real"]["fractional"] is True
     assert card.scenarios["paper"]["n_data_end"] == 1           # data_end exits counted
+    # I8: KRW capital and its USD conversion are labelled; P&L is in USD
+    assert card.scenarios["real"]["capital_krw"] == 50_000
+    assert card.scenarios["real"]["capital_ccy"] == pytest.approx(50_000 / 1380.0)
+    assert card.scenarios["real"]["currency"] == "USD" and card.currency == "USD"
+    assert "capital" not in card.scenarios["real"]
+    # I7: the US real scenario is reference only until plan 2
+    assert set(card.verdict) == {"② 모의 자격", "참고용(계획 2에서 확정)"}
+    text = Path(_md).read_text(encoding="utf-8")
+    assert "실돈 자격" not in text and "sealed_net_pnl (USD)" in text
     # the whole screened pool was validated -> trial variance from its validate Sharpes
     assert card.scenarios["paper"]["sr_var_trials_source"] == "validate_daily_sharpes"
 

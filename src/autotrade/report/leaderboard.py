@@ -78,7 +78,8 @@ def write_leaderboard(log: ExperimentLog, pocket: str, market: str, out: Path,
     if fin.empty:
         lines += ["(봉인 판정 기록 없음)", ""]
     else:
-        lines += ["| rule_id | paper(② 모의) | real(실돈) | paper 탈락 | real 탈락 |",
+        real = "real(참고용, 계획 2에서 확정)" if market == "us" else "real(실돈)"
+        lines += [f"| rule_id | paper(② 모의) | {real} | paper 탈락 | real 탈락 |",
                   "|---|---|---|---|---|"]
         for rid, m in zip(fin["rule_id"], fin["metrics"]):
             p, r = m.get("paper", {}), m.get("real", {})

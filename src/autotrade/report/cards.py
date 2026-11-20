@@ -34,6 +34,7 @@ class RuleCard:
     parity: dict            # Scenario -> parity_report summary
     limitations: list[str]
     validate_runs: int = 1  # `lab validate` runs on these periods before the seal opened
+    currency: str = "KRW"   # the market's currency: P&L and capital_ccy are in it
 
 
 def card_stem(pocket: str, market: str, rule_id: str) -> str:
@@ -58,11 +59,22 @@ def _fmt(v) -> str:
 
 LABELS = {"valid_segments_positive": "검증 기간 구간 안정성 (valid_segments_positive: "
                                       "검증 기간 4개 구간 중 순수익 > 0 구간 수)"}
+# amounts in the market's currency (labelled "(USD)" / "(KRW)" in the markdown)
+MONEY_KEYS = {"valid_net_pnl", "sealed_net_pnl", "top_removed", "net_pnl_ours",
+              "net_pnl_naut", "net_pnl_diff", "capital_ccy"}
 
 
-def _table(rows: dict) -> list[str]:
+def _label(k: str, currency: str) -> str:
+    if k in LABELS:
+        return LABELS[k]
+    if k == "capital_krw":
+        return f"{k} (KRW)"
+    return f"{k} ({currency})" if k in MONEY_KEYS else k
+
+
+def _table(rows: dict, currency: str = "KRW") -> list[str]:
     out = ["| 항목 | 값 |", "|---|---|"]
-    out += [f"| {LABELS.get(k, k)} | {_fmt(v)} |" for k, v in rows.items()]
+    out += [f"| {_label(k, currency)} | {_fmt(v)} |" for k, v in rows.items()]
     return out
 
 
@@ -83,14 +95,15 @@ def render_markdown(card: RuleCard) -> str:
     lines += [f"- {k}: {v[0]} ~ {v[1]}" for k, v in card.periods.items()]
     lines += ["", "## 단계별 성적", ""]
     for stage, m in card.metrics_by_stage.items():
-        lines += [f"### {stage}", ""] + _table(m) + [""]
-    lines += ["## 자본 시나리오 (봉인, NautilusTrader)", ""]
+        lines += [f"### {stage}", ""] + _table(m, card.currency) + [""]
+    lines += [f"## 자본 시나리오 (봉인, NautilusTrader, 손익 {card.currency})", ""]
     for scen, s in card.scenarios.items():
         head = {k: v for k, v in s.items() if k != "metrics"}
-        lines += [f"### {scen}", ""] + _table({**head, **s.get("metrics", {})}) + [""]
+        lines += [f"### {scen}", ""] + _table({**head, **s.get("metrics", {})},
+                                              card.currency) + [""]
     lines += ["## 시뮬레이터 대조 (parity)", ""]
     for scen, p in card.parity.items():
-        lines += [f"### {scen}", ""] + _table(p) + [""]
+        lines += [f"### {scen}", ""] + _table(p, card.currency) + [""]
     lines += ["## 고정 한계", ""] + [f"- {x}" for x in card.limitations] + [""]
     return "\n".join(lines)
 

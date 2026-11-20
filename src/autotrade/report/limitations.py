@@ -5,8 +5,9 @@ from autotrade.config import MarketConfig
 
 
 def limitations(market: MarketConfig, family: str | None = None) -> list[str]:
-    """Delisted-data coverage (per market), not NBBO, no suspension/warning history, and the
-    overnight family's 1-night hold exception."""
+    """Delisted-data coverage (per market), not NBBO, no suspension/warning history, KR
+    KRX+NXT combined daily bars, US fractional-order limits not modelled, and the overnight
+    family's 1-night hold exception."""
     out = []
     if market.delisted_supplement:
         out.append(f"상장폐지 종목({market.market}): pykrx 일봉으로 보충해 생존 편향을 줄였지만, "
@@ -17,6 +18,12 @@ def limitations(market: MarketConfig, family: str | None = None) -> list[str]:
     out.append("미국 시세는 NBBO(전 거래소 최우선 호가)가 아니다 — 토스 제공 시세 기준.")
     out.append("과거 거래정지·투자유의(관리)종목 이력이 없다 — 당시 매매할 수 없던 날·종목이 "
                "포함됐을 수 있다.")
+    if market.market == "kr":
+        out.append("국내 일봉은 KRX+NXT 통합 시세(2025-03 이후 NXT 시간대 체결 포함 가능) — "
+                   "정규장만으로 재구성하지 않음.")
+    if market.market == "us":
+        out.append("미국 실돈 시나리오는 소수점 주문 제약(금액 매수·마감 1시간 전 청산·서버 손절 "
+                   "불가)을 아직 반영하지 않음 — 계획 2.")
     if family == "overnight":
         out.append("overnight 계열: 1박 보유 — 스윙 보유 2~20거래일 규칙의 예외.")
     return out

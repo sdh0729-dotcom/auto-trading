@@ -17,6 +17,9 @@ dependencies = [
     "setuptools<81",  # pykrx imports pkg_resources
 ]
 
+[project.optional-dependencies]
+kronos = ["torch", "huggingface_hub", "einops", "safetensors", "tqdm"]
+
 [dependency-groups]
 dev = ["pytest", "respx"]
 

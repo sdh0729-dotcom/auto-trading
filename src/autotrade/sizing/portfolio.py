@@ -1,8 +1,11 @@
 """Capital-constrained portfolio on top of the simulator's fixed-amount candidates.
 
-Per date: exits dated that day first (free cash and slots), then entries dated that day in
-confidence-descending order, then equity is marked to the close (NaN close carries the last
-valid one). Sizing equity is the equity marked at the previous trading day's close (initial
+Per date, events are applied in physical time order: (a) exits filled at the open (gap_stop;
+signal when exit_at="next_open"), (b) entry_at="next_open" entries, (c) intraday `stop` exits,
+(d) exits at the close (signal when exit_at="close", max_hold, period_end), (e)
+entry_at="close" entries; entries go in confidence-descending order and only see the cash and
+slots freed before them. Then equity is marked to the close (NaN close carries the last valid
+one). Sizing equity is the equity marked at the previous trading day's close (initial
 capital on the first day). Skip-reason precedence: drawdown_stop, daily_loss_stop,
 max_positions, too_small, cash.
 """
@@ -95,9 +98,22 @@ def decide_entry(risk: RiskState, n_open: int, cash: float, symbol: str, entry_p
     return qty, buy_cash, None
 
 
+def _exit_phase(exit_reason: str, exit_at: str) -> str:
+    """When in its exit day a simulator trade fills: "open", "intraday" or "close"."""
+    if exit_reason == "gap_stop" or (exit_reason == "signal" and exit_at == "next_open"):
+        return "open"
+    if exit_reason == "stop":
+        return "intraday"
+    return "close"
+
+
 def run_portfolio(candidates: pd.DataFrame, panel: Panel, cost_model: CostModel,
                   pocket: PocketConfig, capital: float, currency_per_krw: float,
-                  fractional: bool) -> PortfolioResult:
+                  fractional: bool, *, entry_at: str, exit_at: str) -> PortfolioResult:
+    """`entry_at` / `exit_at` are the rule's Signals timing ("next_open" | "close"); they
+    place each candidate's fills in the day's physical order (see module docstring)."""
+    if entry_at not in ("next_open", "close") or exit_at not in ("next_open", "close"):
+        raise ValueError("entry_at/exit_at must be 'next_open' or 'close'")
     cap0 = capital * currency_per_krw
     if candidates.empty:
         return PortfolioResult(pd.Series(dtype=float, name="equity",
@@ -114,9 +130,10 @@ def run_portfolio(candidates: pd.DataFrame, panel: Panel, cost_model: CostModel,
     close = panel.close.ffill()
 
     by_entry = {d: g for d, g in cands.groupby("entry_date")}
-    by_exit: dict[pd.Timestamp, list[int]] = {}
-    for i, d in cands["exit_date"].items():
-        by_exit.setdefault(d, []).append(i)
+    by_exit: dict[tuple[pd.Timestamp, str], list[int]] = {}
+    for i, (d, why) in enumerate(zip(cands["exit_date"], cands["exit_reason"])):
+        by_exit.setdefault((d, _exit_phase(why, exit_at)), []).append(i)
+    entry_phase = "open" if entry_at == "next_open" else "close"
 
     cash = cap0
     risk = RiskState(pocket, cap0)
@@ -125,10 +142,9 @@ def run_portfolio(candidates: pd.DataFrame, panel: Panel, cost_model: CostModel,
     skipped: list[dict] = []
     eq_values: list[float] = []
 
-    for d in dates:
-        risk.begin_day()
-
-        for i in by_exit.get(d, []):
+    def do_exits(d, phase):
+        nonlocal cash
+        for i in by_exit.get((d, phase), []):
             pos = open_pos.pop(i, None)
             if pos is None:
                 continue
@@ -139,17 +155,30 @@ def run_portfolio(candidates: pd.DataFrame, panel: Panel, cost_model: CostModel,
             fills.append({**t.to_dict(), "qty": pos["qty"], "net_pnl": pnl,
                           "net_r": pnl / (pos["qty"] * t.entry_price * t.stop_pct)})
 
-        if d in by_entry:
-            day = by_entry[d].sort_values("confidence", ascending=False, kind="stable")
-            for i, t in day.iterrows():
-                qty, buy_cash, reason = decide_entry(
-                    risk, len(open_pos), cash, t.symbol, t.entry_price, t.stop_pct,
-                    t.confidence, gap_allowance(panel, t.symbol, d), cost_model, fractional)
-                if reason:
-                    skipped.append({**t.to_dict(), "reason": reason})
-                else:
-                    cash -= buy_cash
-                    open_pos[i] = {"qty": qty, "buy_cash": buy_cash}
+    def do_entries(d):
+        nonlocal cash
+        if d not in by_entry:
+            return
+        day = by_entry[d].sort_values("confidence", ascending=False, kind="stable")
+        for i, t in day.iterrows():
+            qty, buy_cash, reason = decide_entry(
+                risk, len(open_pos), cash, t.symbol, t.entry_price, t.stop_pct,
+                t.confidence, gap_allowance(panel, t.symbol, d), cost_model, fractional)
+            if reason:
+                skipped.append({**t.to_dict(), "reason": reason})
+            else:
+                cash -= buy_cash
+                open_pos[i] = {"qty": qty, "buy_cash": buy_cash}
+
+    for d in dates:
+        risk.begin_day()
+        do_exits(d, "open")
+        if entry_phase == "open":
+            do_entries(d)
+        do_exits(d, "intraday")
+        do_exits(d, "close")
+        if entry_phase == "close":
+            do_entries(d)
 
         value = cash
         for i, pos in open_pos.items():

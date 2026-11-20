@@ -31,15 +31,18 @@ def panel(closes: dict, opens: dict | None = None) -> Panel:
     return Panel(o, c, c, c, c * 0 + 1e6, meta)
 
 
-def cand(symbol, entry, exit_, entry_price=100.0, exit_price=100.0, stop=0.05, conf=1.0):
+def cand(symbol, entry, exit_, entry_price=100.0, exit_price=100.0, stop=0.05, conf=1.0,
+         reason="signal"):
     return {"symbol": symbol, "entry_date": DAYS[entry], "entry_price": entry_price,
-            "exit_date": DAYS[exit_], "exit_price": exit_price, "exit_reason": "signal",
+            "exit_date": DAYS[exit_], "exit_price": exit_price, "exit_reason": reason,
             "stop_pct": stop, "confidence": conf}
 
 
-def run(rows, p, cm=FREE, pocket=POCKET, capital=1_000_000.0, fx=1.0, fractional=True):
+def run(rows, p, cm=FREE, pocket=POCKET, capital=1_000_000.0, fx=1.0, fractional=True,
+        entry_at="next_open", exit_at="next_open"):
     df = pd.DataFrame(rows, columns=TRADE_COLUMNS)
-    return run_portfolio(df, p, cm, pocket, capital, fx, fractional)
+    return run_portfolio(df, p, cm, pocket, capital, fx, fractional, entry_at=entry_at,
+                         exit_at=exit_at)
 
 
 def reasons(res):
@@ -122,6 +125,51 @@ def test_exits_free_slots_before_same_day_entries():
     res = run([cand("A", 1, 4), cand("B", 4, 6)], p, pocket=pocket)
     assert set(res.fills["symbol"]) == {"A", "B"}
     assert res.skipped.empty
+
+
+@pytest.mark.parametrize("reason,exit_at,freed", [
+    ("gap_stop", "next_open", True),     # fills at D's open, before D's open entries
+    ("signal", "next_open", True),       # pending next_open exit fills at D's open
+    ("stop", "next_open", False),        # intraday on D: after D's open entries
+    ("signal", "close", False),          # at D's close
+    ("max_hold", "next_open", False),    # at D's close
+])
+def test_open_entry_sees_only_exits_filled_by_the_open(reason, exit_at, freed):
+    pocket = replace(POCKET, max_positions=1)
+    p = panel({"A": 100.0, "B": 100.0})
+    res = run([cand("A", 1, 4, reason=reason), cand("B", 4, 6)], p, pocket=pocket,
+              exit_at=exit_at)
+    if freed:
+        assert set(res.fills["symbol"]) == {"A", "B"} and res.skipped.empty
+    else:
+        assert set(res.fills["symbol"]) == {"A"}
+        assert reasons(res) == {"B": "max_positions"}
+
+
+def test_open_entry_cash_excludes_same_day_intraday_and_close_proceeds():
+    pocket = replace(POCKET, max_position_weight=0.6, risk_per_trade=1.0)
+    p = panel({"A": 100.0, "B": 100.0})
+    # A holds 60% of equity; it is stopped intraday on day 4 -> B's open entry lacks cash
+    res = run([cand("A", 1, 4, reason="stop"), cand("B", 4, 6)], p, pocket=pocket)
+    assert reasons(res) == {"B": "cash"}
+    res = run([cand("A", 1, 4, reason="gap_stop"), cand("B", 4, 6)], p, pocket=pocket)
+    assert res.skipped.empty
+
+
+def test_close_entry_sees_all_exits_of_the_day():
+    pocket = replace(POCKET, max_positions=1)
+    p = panel({"A": 100.0, "B": 100.0})
+    for reason in ("stop", "max_hold", "signal"):
+        res = run([cand("A", 1, 4, reason=reason), cand("B", 4, 6)], p, pocket=pocket,
+                  entry_at="close", exit_at="close")
+        assert set(res.fills["symbol"]) == {"A", "B"} and res.skipped.empty
+
+
+def test_open_entry_stopped_out_same_day_is_closed():
+    p = panel({"A": 100.0})
+    res = run([cand("A", 4, 4, exit_price=95.0, reason="stop")], p)
+    assert len(res.fills) == 1
+    assert res.equity.iloc[-1] == pytest.approx(1_000_000 + res.fills["net_pnl"].iloc[0])
 
 
 def test_cash_shortage_skips():

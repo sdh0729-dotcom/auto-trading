@@ -25,13 +25,18 @@ def all_true_mask(p: Panel) -> pd.DataFrame:
     return pd.DataFrame(True, index=p.close.index, columns=p.close.columns)
 
 
+def timing(rule, p: Panel) -> dict:
+    sig = rule.signals(p)
+    return {"entry_at": sig.entry_at, "exit_at": sig.exit_at}
+
+
 @pytest.mark.parametrize("family", ["breakout", "oversold", "overnight", "tom"])
 def test_parity_with_simulator(family):
     p = make_panel(300, ["A", "B", "069500"], seed=7, products={"069500": "etf"})
     rule = SWING_FAMILIES[family](SWING_FAMILIES[family].grid()[0])
     elig = all_true_mask(p)
     ours = run_portfolio(simulate(p, rule.signals(p), elig, START, END), p, CM, SWING,
-                         5_000_000, 1.0, False).fills
+                         5_000_000, 1.0, False, **timing(rule, p)).fills
     naut = run_nautilus(rule, p, elig, START, END, CM, SWING, 5_000_000, 1.0, False)
     assert len(ours) > 0
     assert len(naut) == len(ours)
@@ -53,7 +58,7 @@ def test_parity_us_fractional():
     rule = SWING_FAMILIES["breakout"](SWING_FAMILIES["breakout"].grid()[0])
     elig = all_true_mask(p)
     ours = run_portfolio(simulate(p, rule.signals(p), elig, START, END), p, cm, SWING,
-                         5_000_000, 0.00075, True).fills
+                         5_000_000, 0.00075, True, **timing(rule, p)).fills
     naut = run_nautilus(rule, p, elig, START, END, cm, SWING, 5_000_000, 0.00075, True)
     assert len(ours) > 0 and len(naut) == len(ours)
     assert (naut["qty"] % 1 != 0).any()                       # fractional shares
@@ -103,7 +108,7 @@ def test_skipped_candidate_blocks_symbol_until_its_would_be_exit():
     elig = all_true_mask(p)
     s, e = p.close.index[0].date(), p.close.index[-1].date()
     ours = run_portfolio(simulate(p, rule.signals(p), elig, s, e), p, CM, one_slot,
-                         5_000_000, 1.0, False).fills
+                         5_000_000, 1.0, False, **timing(rule, p)).fills
     naut = run_nautilus(rule, p, elig, s, e, CM, one_slot, 5_000_000, 1.0, False)
     d = p.close.index
     # B@2 skipped (slot held by A) -> its would-be trade 2..12 blocks the B@11 signal
@@ -116,7 +121,7 @@ def test_parity_report_lists_mismatches():
     p = make_panel(300, ["A", "B", "069500"], seed=7, products={"069500": "etf"})
     rule = SWING_FAMILIES["breakout"](SWING_FAMILIES["breakout"].grid()[0])
     ours = run_portfolio(simulate(p, rule.signals(p), all_true_mask(p), START, END), p, CM,
-                         SWING, 5_000_000, 1.0, False).fills
+                         SWING, 5_000_000, 1.0, False, **timing(rule, p)).fills
     same = parity_report(ours, ours)
     assert same["n_ours"] == same["n_naut"] == len(ours)
     assert same["matched_share"] == 1.0 and same["exit_reason_agreement"] == 1.0
@@ -141,7 +146,7 @@ def test_kr_integer_prices_trade_on_the_won_grid():
     rule = SWING_FAMILIES["breakout"](SWING_FAMILIES["breakout"].grid()[0])
     elig = all_true_mask(p)
     ours = run_portfolio(simulate(p, rule.signals(p), elig, START, END), p, CM, SWING,
-                         5_000_000, 1.0, False).fills
+                         5_000_000, 1.0, False, **timing(rule, p)).fills
     naut = run_nautilus(rule, p, elig, START, END, CM, SWING, 5_000_000, 1.0, False)
     rep = parity_report(ours, naut)
     assert rep["matched_share"] == 1.0 and rep["exit_reason_agreement"] == 1.0
@@ -167,7 +172,7 @@ def test_missing_price_closes_period_end_at_last_valid_close():
     elig = all_true_mask(p)
     s, e = p.close.index[0].date(), p.close.index[-1].date()
     ours = run_portfolio(simulate(p, rule.signals(p), elig, s, e), p, CM, SWING,
-                         5_000_000, 1.0, False).fills
+                         5_000_000, 1.0, False, **timing(rule, p)).fills
     naut = run_nautilus(rule, p, elig, s, e, CM, SWING, 5_000_000, 1.0, False)
     d = p.close.index
     a = naut[naut["symbol"] == "A"]
@@ -176,3 +181,21 @@ def test_missing_price_closes_period_end_at_last_valid_close():
     assert a["exit_price"].iloc[0] == 10_100.0
     rep = parity_report(ours, naut)
     assert rep["matched_share"] == 1.0 and rep["mismatches"] == []
+
+
+def test_parity_breakout_with_binding_max_positions():
+    """40 symbols: max_positions binds, so same-day exit/entry ordering matters."""
+    p = make_panel(1000, [f"S{i:02d}" for i in range(40)], seed=3)
+    cm = CostModel(KR, lambda s: "stock")
+    rule = SWING_FAMILIES["breakout"](SWING_FAMILIES["breakout"].grid()[0])
+    elig = all_true_mask(p)
+    s, e = date(2016, 6, 1), p.close.index[-1].date()
+    res = run_portfolio(simulate(p, rule.signals(p), elig, s, e), p, cm, SWING, 5_000_000,
+                        1.0, False, **timing(rule, p))
+    assert (res.skipped["reason"] == "max_positions").any()
+    ours = res.fills
+    naut = run_nautilus(rule, p, elig, s, e, cm, SWING, 5_000_000, 1.0, False)
+    assert len(naut) == len(ours)
+    assert np.allclose(naut["net_pnl"].sum(), ours["net_pnl"].sum(), rtol=0.01)
+    assert (naut["exit_reason"].values == ours["exit_reason"].values).mean() >= 0.95
+    assert parity_report(ours, naut)["matched_share"] == 1.0

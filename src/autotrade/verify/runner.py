@@ -23,10 +23,6 @@ Known, documented differences to the simulator (`parity_report` lists any that o
 - A position whose symbol has no price on a day closes `period_end` labelled with the last
   valid date, but Nautilus can only sell it (at that last close) on the missing day, so the
   cash arrives one day later than in `run_portfolio`.
-- `run_portfolio` frees cash/slots from all of a day's exits before that day's entries. For
-  next_open entries Nautilus only knows the exits up to the open (gap stops, pending
-  next_open exits); intraday stops and close exits come later the same day. Only matters
-  when the cash or max_positions limit binds on such a day.
 """
 from __future__ import annotations
 

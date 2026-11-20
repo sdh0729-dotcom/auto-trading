@@ -130,6 +130,31 @@ def test_exclusion_keywords_ascii_case_insensitive():
     assert not m["U"].iloc[-1] and m["OK"].iloc[-1]
 
 
+def test_us_exclusion_keywords_match_whole_words():
+    names = {"STT": "iShares Short-Term Treasury Bond ETF",        # not an inverse ETF
+             "SH": "ProShares Short S&P500",                       # inverse
+             "SQQQ": "ProShares UltraPro Short QQQ",
+             "SDS": "ProShares UltraShort S&P500",
+             "TQQQ": "ProShares UltraPro QQQ",
+             "BEAR": "Direxion Daily Semiconductor Bear 3X Shares",
+             "SHORTZ": "Shortz Holdings Inc"}                      # word containing "short"
+    p = make_panel(40, list(names), seed=6, name=names)
+    for sym in names:
+        _flat(p, sym, 50.0, 2e6)
+    m = eligible_mask(p, replace(US, always_include=[]), SWING, LAB, "paper", 1400).iloc[-1]
+    assert m.to_dict() == {"STT": True, "SH": False, "SQQQ": False, "SDS": False,
+                           "TQQQ": False, "BEAR": False, "SHORTZ": True}
+
+
+def test_kr_keywords_still_match_inside_names():
+    p = make_panel(40, ["LEV", "X2"], seed=6, name={"LEV": "KODEX 코스닥150레버리지",
+                                                     "X2": "TIGER 미국테크TOP10선물2X"})
+    for sym in ("LEV", "X2"):
+        _flat(p, sym, 10_000.0)
+    m = eligible_mask(p, KR, SWING, LAB, "paper", 1400)
+    assert not m["LEV"].iloc[-1] and not m["X2"].iloc[-1]
+
+
 def test_excludes_non_stock_etf_products():
     p = make_panel(40, ["A"], seed=6)
     p.meta["product"] = p.meta["product"].astype(object)

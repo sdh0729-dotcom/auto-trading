@@ -640,3 +640,44 @@ def test_pipeline_passes_the_scenario_mask_to_signals(cli_env, monkeypatch):
     assert calls and None not in calls
     final = calls[n_before:]                     # paper and real masks differ in size
     assert len(final) == 4 and final[0] != final[2]
+
+
+def test_universe_refuses_sealed_dates_once_periods_exist(cli_env):
+    per = periods_of(cli_env)
+    day = per.sealed[0].isoformat()
+    run(["universe", "--market", "kr", "--date", day])          # no periods yet: allowed
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    r = CliRunner().invoke(app, ["universe", "--market", "kr", "--date", day])
+    assert r.exit_code == 1 and "sealed" in r.output and "Traceback" not in r.output
+    run(["universe", "--market", "kr", "--date", per.valid[1].isoformat()])
+
+
+def test_sync_rejects_percent_like_api_commission(cli_env, monkeypatch):
+    out = cli_env.root / "api-synced.yaml"
+    monkeypatch.setenv("AUTOTRADE_SYNCED", str(out))
+    comm = [{"marketCountry": "KR", "commissionRate": "0.015", "startDate": None,
+             "endDate": None},                                  # 1.5%: a percent, not a ratio
+            {"marketCountry": "US", "commissionRate": "0.001", "startDate": None,
+             "endDate": None}]
+    monkeypatch.setattr(pipeline, "make_client_from_env", lambda path: FakeClient(comm))
+    r = CliRunner().invoke(app, ["sync"])
+    assert r.exit_code == 1 and "0.015" in r.output and not out.exists()
+
+
+def test_sync_stores_promo_end_and_warns_when_past(cli_env, monkeypatch):
+    out = cli_env.root / "api-synced.yaml"
+    monkeypatch.setenv("AUTOTRADE_SYNCED", str(out))
+    comm = [{"marketCountry": "KR", "commissionRate": "0.00015", "startDate": "2020-01-01",
+             "endDate": "2026-12-31"},
+            {"marketCountry": "US", "commissionRate": "0.001", "startDate": None,
+             "endDate": None}]
+    monkeypatch.setattr(pipeline, "make_client_from_env", lambda path: FakeClient(comm))
+    pipeline.sync(today=date(2026, 11, 20))
+    d = yaml.safe_load(out.read_text())
+    assert d["commission_end_date"] == {"kr": "2026-12-31", "us": None}
+    assert pipeline.commission_warnings(date(2026, 12, 31)) == []
+    w = pipeline.commission_warnings(date(2027, 1, 1))
+    assert len(w) == 1 and "kr" in w[0] and "2026-12-31" in w[0] and "lab sync" in w[0]
+    monkeypatch.setattr(pipeline, "commission_warnings", lambda today=None: w)
+    r = run(["journal", "x"])
+    assert "2026-12-31" in r.output                       # printed before any command runs

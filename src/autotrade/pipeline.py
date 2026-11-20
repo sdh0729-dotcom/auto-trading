@@ -216,7 +216,9 @@ def _rule(families: dict, family: str, params: dict, rule_id: str | None = None)
 
 
 # ---------------------------------------------------------------- sync
-def _pick_commission(rows: list[dict], country: str, today: date) -> float | None:
+def _pick_commission(rows: list[dict], country: str, today: date
+                     ) -> tuple[float, str | None] | None:
+    """(rate, endDate or None) of the first row of `country` in effect on `today`."""
     for r in rows:
         if str(r.get("marketCountry")).upper() != country:
             continue
@@ -225,8 +227,24 @@ def _pick_commission(rows: list[dict], country: str, today: date) -> float | Non
             continue
         if end and date.fromisoformat(end) < today:
             continue
-        return float(r["commissionRate"])
+        return float(r["commissionRate"]), (str(end) if end else None)
     return None
+
+
+def commission_warnings(today: date | None = None) -> list[str]:
+    """One warning per market whose synced (promotional) commission ended before `today`;
+    nothing when synced.yaml is missing or unreadable."""
+    today = today or date.today()
+    try:
+        synced = load_synced()
+    except ConfigError:
+        return []
+    out = []
+    for m, end in sorted(synced.commission_end_date.items()):
+        if end and date.fromisoformat(str(end)) < today:
+            out.append(f"warning: the synced {m} commission rate ended {end} (synced "
+                       f"{synced.synced_at}): run `lab sync` again")
+    return out
 
 
 def _client():
@@ -264,19 +282,24 @@ def sync(kr_commission: float | None = None, us_commission: float | None = None,
         raise LabError(f"sync failed: {e}") from e
     except httpx.HTTPError as e:
         raise LabError(f"sync failed: network error ({type(e).__name__})") from e
-    rates, source = {}, {}
+    rates, source, ends = {}, {}, {}
     for m, country in (("kr", "KR"), ("us", "US")):
         if manual[m] is not None:
-            rates[m], source[m] = float(manual[m]), "manual"
+            rates[m], source[m], ends[m] = float(manual[m]), "manual", None
             continue
         v = _pick_commission(api_rows, country, today) if api_rows is not None else None
         if v is None:
             raise LabError(f"no {m} commission: set TOSS_ACCOUNT_SEQ for the commissions "
                            f"API or pass --{m}-commission (decimal ratio)")
-        rates[m], source[m] = v, "api"
+        if not 0 <= v[0] < MAX_COMMISSION:
+            raise LabError(f"API {m} commission {v[0]} is not a decimal ratio below "
+                           f"{MAX_COMMISSION}; check the API response or pass "
+                           f"--{m}-commission")
+        (rates[m], ends[m]), source[m] = v, "api"
     out = {"commission_rate": rates, "usd_krw": usd_krw,
            "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-           "source": {"commission_rate": source, "usd_krw": "api"}}
+           "source": {"commission_rate": source, "usd_krw": "api"},
+           "commission_end_date": ends}
     path = _synced_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(out, sort_keys=False, allow_unicode=True), encoding="utf-8")
@@ -350,6 +373,10 @@ def universe(market: str, pocket: str, scenario: str, day: date) -> list[str]:
     if scenario not in SCENARIOS:
         raise LabError(f"unknown scenario {scenario!r} (choose from {', '.join(SCENARIOS)})")
     mc, pc, lab, synced = load_market(market), load_pocket(pocket), load_lab(), load_synced()
+    rec = _load_periods(pocket, market)
+    if rec is not None and day >= rec.periods.sealed[0]:
+        raise LabError(f"{day} is not before the sealed period of {pocket}/{market} (from "
+                       f"{rec.periods.sealed[0]}): lab universe shows train/valid dates only")
     p = load_panel(market, None, lab.swing_start, day)
     ts = pd.Timestamp(day)
     if len(p.close.index) == 0:
@@ -713,5 +740,6 @@ def journal(memo: str, now: datetime | None = None) -> Path:
     return path
 
 
-__all__ = ["ConfigError", "LabError", "collect", "journal", "nautilus_result", "periods",
+__all__ = ["ConfigError", "LabError", "collect", "commission_warnings", "journal",
+           "nautilus_result", "periods",
            "report", "screen", "sync", "universe", "validate", "verify_final"]

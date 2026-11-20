@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -128,6 +128,8 @@ class SyncedValues:
     commission_rate: dict[Market, float]
     usd_krw: float
     synced_at: str
+    # promotional rate end date from the commissions API (ISO) or None
+    commission_end_date: dict = field(default_factory=dict)
 
 
 def load_market_raw(m: Market) -> MarketConfig:
@@ -184,6 +186,7 @@ def load_synced() -> SyncedValues:
     try:
         return SyncedValues(commission_rate=dict(d["commission_rate"]),
                             usd_krw=float(d["usd_krw"]),
-                            synced_at=str(d["synced_at"]))
+                            synced_at=str(d["synced_at"]),
+                            commission_end_date=dict(d.get("commission_end_date") or {}))
     except (KeyError, TypeError, ValueError) as e:
         raise ConfigError("run `lab sync` first") from e

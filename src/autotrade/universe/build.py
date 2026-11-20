@@ -30,6 +30,20 @@ def _tick_frame(close_prev: pd.DataFrame, market: MarketConfig,
     return out
 
 
+def _keyword_pattern(market: MarketConfig) -> str:
+    """Exclusion regex. US ASCII keywords match whole words only: not inside a longer word
+    and not joined by a hyphen ("Short" excludes "ProShares Short QQQ", not "Short-Term
+    Treasury" or "Shortz"). Other keywords (Korean names, every KR keyword) match anywhere,
+    since Korean ETF names glue them to other words (e.g. "코스닥150레버리지")."""
+    parts = []
+    for k in market.exclude_name_keywords:
+        e = re.escape(k)
+        if market.market == "us" and k.isascii():
+            e = rf"(?<![\w-]){e}(?![\w-])"
+        parts.append(e)
+    return "|".join(parts)
+
+
 def eligible_mask(panel: Panel, market: MarketConfig, pocket: PocketConfig,
                   lab: LabConfig, scenario: Scenario, usd_krw: float) -> pd.DataFrame:
     """Point-in-time eligibility (date x symbol, bool).
@@ -43,7 +57,8 @@ def eligible_mask(panel: Panel, market: MarketConfig, pocket: PocketConfig,
     Rules:
     - False if close at t-1 is NaN (not listed / delisted / suspended).
     - Always False: is_common_share is False, name contains an exclude keyword
-      (case-insensitive), or product not in {stock, etf}.
+      (case-insensitive; US ASCII keywords as whole words, see `_keyword_pattern`), or
+      product not in {stock, etf}.
     - Rank: top `universe_top_n` by `adv_window`-day mean trading value (close*volume)
       among non-excluded symbols with data, within this market.
     - Filters run only when the market config defines them: tick cost
@@ -64,8 +79,8 @@ def eligible_mask(panel: Panel, market: MarketConfig, pocket: PocketConfig,
     allowed = meta["product"].isin(_ALLOWED_PRODUCTS)
     excluded = ~common | ~allowed
     if market.exclude_name_keywords:
-        pat = "|".join(re.escape(k) for k in market.exclude_name_keywords)
-        excluded |= meta["name"].fillna("").astype(str).str.contains(pat, case=False, regex=True)
+        excluded |= meta["name"].fillna("").astype(str).str.contains(
+            _keyword_pattern(market), case=False, regex=True)
     ok_symbol = pd.Series(~excluded.to_numpy(), index=cols)
 
     # --- rank by trailing trading value, shifted one day ---

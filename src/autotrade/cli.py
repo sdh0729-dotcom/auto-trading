@@ -21,8 +21,10 @@ EXPECTED_ERRORS = (pipeline.LabError, ConfigError, SealViolation)
 @app.callback()
 def _startup() -> None:
     """Runs before every command: load .env first, so paths and credentials it sets are seen
-    by everything that follows."""
+    by everything that follows; then warn about an expired synced commission rate."""
     load_env()
+    for w in pipeline.commission_warnings():
+        typer.echo(w, err=True)
 
 
 def _expected_errors(fn):
@@ -62,8 +64,11 @@ def sync(kr_commission: Optional[float] = typer.Option(
     """Fetch commissions and USD/KRW into config/synced.yaml."""
     out = pipeline.sync(kr_commission, us_commission)
     src = out["source"]["commission_rate"]
+    ends = out.get("commission_end_date", {})
     typer.echo(f"wrote {out['path']}: commission kr={out['commission_rate']['kr']} "
-               f"({src['kr']}), us={out['commission_rate']['us']} ({src['us']}), "
+               f"({src['kr']}{', until ' + ends['kr'] if ends.get('kr') else ''}), "
+               f"us={out['commission_rate']['us']} "
+               f"({src['us']}{', until ' + ends['us'] if ends.get('us') else ''}), "
                f"usd_krw={out['usd_krw']}")
 
 

@@ -90,7 +90,6 @@ def test_signal_at_t_uses_only_history_through_t(monkeypatch):
 
 # --- C2: seeded sampling and the probe's data window ---------------------------------------
 import importlib.util  # noqa: E402
-from datetime import date  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import pytest  # noqa: E402

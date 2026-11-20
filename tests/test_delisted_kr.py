@@ -117,3 +117,15 @@ def test_pykrx_uses_shared_clean_daily(monkeypatch):
     monkeypatch.setattr(delisted_kr, "_pykrx_ohlcv", lambda *a, **k: korean_cols_df(5))
     fetch_delisted_daily("000000", date(2018, 1, 1), date(2018, 12, 31))
     assert seen == [5]
+
+
+def test_failure_is_logged_with_type_and_message(monkeypatch, tmp_data, caplog):
+    save_kr_meta({"444444": True})
+
+    def boom(*a, **k):
+        raise ConnectionError("KRX server closed the connection")
+    monkeypatch.setattr(delisted_kr, "_pykrx_ohlcv", boom)
+    rep = supplement_delisted_kr(date(2018, 1, 1))
+    assert rep.failed == ["444444"]
+    assert "444444" in caplog.text and "ConnectionError" in caplog.text
+    assert "KRX server closed the connection" in caplog.text

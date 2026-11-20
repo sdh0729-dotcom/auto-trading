@@ -137,7 +137,7 @@ def test_load_sealed_requires_issued_ticket(tmp_path):
 
 
 # --- persisted periods (C1) ------------------------------------------------------------------
-from autotrade.validate.periods import (MIN_NEW_CYCLE_DAYS, PeriodError, PeriodRecord,  # noqa: E402
+from autotrade.validate.periods import (MIN_NEW_CYCLE_DAYS, PeriodError,  # noqa: E402
                                         load_record, new_cycle, new_record, save_record)
 
 

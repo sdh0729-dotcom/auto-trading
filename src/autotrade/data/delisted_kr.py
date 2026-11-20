@@ -6,6 +6,7 @@ has data from another source.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -17,6 +18,7 @@ from autotrade.data.store import load_daily, load_meta, save_daily
 
 PYKRX_COLUMNS = {"시가": "open", "고가": "high", "저가": "low", "종가": "close", "거래량": "volume"}
 CALL_INTERVAL_S = 0.5
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -69,6 +71,7 @@ def supplement_delisted_kr(start: date, symbols: list[str] | None = None) -> Sup
                 continue
             save_daily("kr", sym, df)
             report.fetched += 1
-        except Exception:
+        except Exception as e:      # noqa: BLE001 - pykrx/KRX errors carry no secrets
+            log.warning("pykrx delisted %s failed: %s: %s", sym, type(e).__name__, e)
             report.failed.append(sym)
     return report

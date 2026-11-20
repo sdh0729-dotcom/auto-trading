@@ -372,9 +372,11 @@ def _collect_failed(market: str, sym: str, e: Exception, failed: list[str],
 
 
 def collect(market: str, since: date | None = None, limit: int | None = None) -> dict:
-    """Meta -> incremental daily bars (Toss) -> (KR) pykrx delisted supplement (its counts
-    saved to data/<market>/supplement.json for the reports) -> quality summary. `limit` keeps the first N symbols, always_include first, and marks the data
-    as partial (screen / validate / verify --final refuse it) until a full collect."""
+    """Meta -> incremental daily bars (Toss) from `since` (default lab.history_start) ->
+    (KR) pykrx delisted supplement (its counts saved to data/<market>/supplement.json for the
+    reports) -> quality summary. `limit` keeps the first N symbols, always_include first, and
+    marks the data as partial (screen / validate / verify --final refuse it) until a full
+    collect. A Toss 401/403 or MAX_CONSECUTIVE_FAILURES failing symbols in a row abort it."""
     _check_market(market)
     mc = load_market_raw(market)
     start = since or load_lab().history_start      # swing_start - warmup_days

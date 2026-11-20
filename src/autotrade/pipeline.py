@@ -86,6 +86,17 @@ def periods_path(pocket: str, market: str) -> Path:
     return research_root() / f"periods-{pocket}-{market}.json"
 
 
+def limited_marker(market: str) -> Path:
+    """Exists while the stored data comes from `lab collect --limit` (a partial universe)."""
+    return data_root() / market / ".limited"
+
+
+def _refuse_limited(market: str) -> None:
+    if limited_marker(market).exists():
+        raise LabError(f"{market} data comes from `lab collect --limit` (partial universe): "
+                       f"run a full `lab collect --market {market}` first")
+
+
 def cards_dir() -> Path:
     return research_root() / "rule-cards"
 
@@ -138,6 +149,7 @@ def _setup(pocket: str, market: str, create: bool = False) -> Setup:
     `screen`) may split the stored trading dates and write the period file."""
     _check_market(market)
     _families(pocket)
+    _refuse_limited(market)
     mc, pc, lab, synced = load_market(market), load_pocket(pocket), load_lab(), load_synced()
     rec = _load_periods(pocket, market)
     if rec is None:
@@ -271,7 +283,8 @@ def sync(kr_commission: float | None = None, us_commission: float | None = None,
 # ---------------------------------------------------------------- collect
 def collect(market: str, since: date | None = None, limit: int | None = None) -> dict:
     """Meta -> incremental daily bars (Toss) -> (KR) pykrx delisted supplement -> quality
-    summary. `limit` keeps the first N symbols, always_include first."""
+    summary. `limit` keeps the first N symbols, always_include first, and marks the data
+    as partial (screen / validate / verify --final refuse it) until a full collect."""
     _check_market(market)
     mc = load_market_raw(market)
     start = since or load_lab().swing_start
@@ -300,6 +313,12 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
     supplement = None
     if via_pykrx:
         supplement = supplement_delisted_kr(start, symbols=via_pykrx)
+    marker = limited_marker(market)
+    if limit is not None:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"lab collect --limit {limit}\n", encoding="utf-8")
+    else:
+        marker.unlink(missing_ok=True)
     summary = {"symbols": len(ordered), "rows_added": added, "clean": 0, "issues": 0,
                "warnings": 0, "missing": 0, "failed": failed}
     for sym in ordered:

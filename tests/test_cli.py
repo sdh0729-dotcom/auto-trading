@@ -526,3 +526,25 @@ def test_periods_new_cycle_preconditions(cli_env):
     assert rec["valid"] == [per.valid[0].isoformat(), per.valid[1].isoformat()]
     first_new = pd.bdate_range(per.sealed[1], periods=2)[1]
     assert rec["sealed"] == [first_new.date().isoformat(), new_days[-1].date().isoformat()]
+
+
+def test_limited_collect_blocks_research_until_a_full_collect(cli_env, monkeypatch):
+    meta = pd.DataFrame({"name": ["X", "Y"], "delisted": [False, False]},
+                        index=pd.Index(["A01", "A02"], name="symbol"))
+    monkeypatch.setattr(pipeline, "make_client_from_env", lambda path: object())
+    monkeypatch.setattr(pipeline, "collect_meta", lambda client, market: meta)
+    monkeypatch.setattr(pipeline, "collect_daily", lambda client, market, symbol, start: 0)
+    monkeypatch.setattr(pipeline, "supplement_delisted_kr", lambda start, symbols=None: None)
+    marker = cli_env.data / "kr" / ".limited"
+    run(["collect", "--market", "kr", "--limit", "1"])
+    assert marker.exists()
+    for args in (["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"],
+                 ["validate", "--pocket", "swing", "--market", "kr"],
+                 ["verify", "--final", "--pocket", "swing", "--market", "kr", "--rule-id", "x"]):
+        r = CliRunner().invoke(app, args)
+        assert r.exit_code == 1 and "--limit" in r.output and "Traceback" not in r.output
+    assert not (cli_env.research / "seal-registry.json").exists()
+    assert not periods_file(cli_env).exists()
+    run(["collect", "--market", "kr"])                   # full collect clears the marker
+    assert not marker.exists()
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])

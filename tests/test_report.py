@@ -130,3 +130,18 @@ def test_leaderboard_lists_and_links_final_verdicts_per_cycle(tmp_path):
     text = out.read_text(encoding="utf-8")
     assert "(rule-cards/swing-kr-c1-breakout-00000000.md)" in text
     assert "(rule-cards/swing-kr-c2-breakout-00000000.md)" in text
+
+
+def test_limitations_show_the_actual_supplement_results(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTOTRADE_DATA", str(tmp_path))
+    kr = load_market_raw("kr")
+    assert any("보충 기록 없음" in x for x in limitations(kr))     # flag set, nothing recorded
+    (tmp_path / "kr").mkdir()
+    (tmp_path / "kr" / "supplement.json").write_text(json.dumps(
+        {"date": "2026-11-20", "since": "2014-11-27", "requested": 120, "fetched": 100,
+         "empty": 12, "failed": 5, "skipped": 3}), encoding="utf-8")
+    line = next(x for x in limitations(kr) if "상장폐지" in x)
+    assert "2026-11-20" in line and "받음 100" in line and "빈 응답 12" in line
+    assert "실패 5" in line and "건너뜀 3" in line and "대상 120" in line
+    us = next(x for x in limitations(load_market_raw("us")) if "상장폐지" in x)
+    assert "보충하지 않음" in us                                  # US: no supplement at all

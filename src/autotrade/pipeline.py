@@ -33,7 +33,7 @@ from autotrade.config import (ConfigError, LabConfig, MarketConfig, PocketConfig
                               load_pocket, load_synced, repo_root)
 from autotrade.costs import CostModel
 from autotrade.data.collect import collect_daily, collect_meta
-from autotrade.data.delisted_kr import supplement_delisted_kr
+from autotrade.data.delisted_kr import save_supplement_record, supplement_delisted_kr
 from autotrade.data.quality import check_daily, hard_issues
 from autotrade.data.store import (calendar, data_root, load_daily, load_panel, stored_symbols,
                                   trading_dates)
@@ -372,8 +372,8 @@ def _collect_failed(market: str, sym: str, e: Exception, failed: list[str],
 
 
 def collect(market: str, since: date | None = None, limit: int | None = None) -> dict:
-    """Meta -> incremental daily bars (Toss) -> (KR) pykrx delisted supplement -> quality
-    summary. `limit` keeps the first N symbols, always_include first, and marks the data
+    """Meta -> incremental daily bars (Toss) -> (KR) pykrx delisted supplement (its counts
+    saved to data/<market>/supplement.json for the reports) -> quality summary. `limit` keeps the first N symbols, always_include first, and marks the data
     as partial (screen / validate / verify --final refuse it) until a full collect."""
     _check_market(market)
     mc = load_market_raw(market)
@@ -408,6 +408,8 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
     supplement = None
     if via_pykrx:
         supplement = supplement_delisted_kr(start, symbols=via_pykrx)
+        if supplement is not None:      # what reports state, instead of the config flag
+            save_supplement_record(supplement, start, len(via_pykrx), market)
     marker = limited_marker(market)
     if limit is not None:
         marker.parent.mkdir(parents=True, exist_ok=True)

@@ -977,3 +977,29 @@ def test_sma200_rule_enters_right_after_swing_start_with_no_trade_or_stat_before
     assert (trades["exit_date"] >= SWING_START).all()
     rows = ExperimentLog(cli_env.research / "experiments.jsonl").rows("swing", "kr")
     assert all(pd.Timestamp(p[0]) >= SWING_START for p in rows["period"])
+
+
+# ---------------------------------------------------------------- P6: actual supplement results
+def test_collect_writes_the_supplement_record_and_reports_show_it(cli_env, monkeypatch):
+    from autotrade.data.delisted_kr import SupplementReport
+    meta = pd.DataFrame({"name": ["X", "D1", "D2", "D3", "D4"],
+                         "delisted": [False, True, True, True, True]},
+                        index=pd.Index(["000010", "000041", "000042", "000043", "000044"],
+                                       name="symbol"))
+    monkeypatch.setattr(pipeline, "make_client_from_env", lambda path: object())
+    monkeypatch.setattr(pipeline, "collect_meta", lambda client, market: meta)
+    monkeypatch.setattr(pipeline, "collect_daily", lambda client, market, symbol, start: 0)
+    monkeypatch.setattr(pipeline, "supplement_delisted_kr", lambda start, symbols=None:
+                        SupplementReport(fetched=1, empty=["000042"], failed=["000043"],
+                                         skipped=["000044"]))
+    path = cli_env.data / "kr" / "supplement.json"
+    board = pipeline.report("swing", "kr").read_text(encoding="utf-8")
+    assert "보충 기록 없음" in board and not path.exists()
+    pipeline.collect("kr")
+    rec = json.loads(path.read_text(encoding="utf-8"))
+    assert {k: rec[k] for k in ("requested", "fetched", "empty", "failed", "skipped")} == \
+        {"requested": 4, "fetched": 1, "empty": 1, "failed": 1, "skipped": 1}
+    assert rec["date"] == date.today().isoformat() and rec["since"] == "2014-11-27"
+    board = pipeline.report("swing", "kr").read_text(encoding="utf-8")
+    assert "보충 기록 없음" not in board
+    assert "받음 1" in board and "실패 1" in board and "건너뜀 1" in board

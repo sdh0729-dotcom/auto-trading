@@ -569,7 +569,8 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     period_store.save_record(periods_path(pocket, market), rec)
     for rid, m in metrics.items():
         m.update(pbo=pbo, pbo_candidates=len(metrics), in_top=rid in top_ids,
-                 recommended=rid in recommended, validate_run=rec.validate_runs)
+                 recommended=rid in recommended, recommended_ids=list(recommended),
+                 validate_run=rec.validate_runs)
         log.record(pocket, market, m["family"], rid, m["params"], "validate", _iso((v0, v1)),
                    {k: v for k, v in m.items() if k not in ("family", "params")})
     table = pd.DataFrame([{"rule_id": rid, **{k: metrics[rid][k] for k in (
@@ -628,6 +629,16 @@ def _sr_var_trials(log_rows: pd.DataFrame, valid_period: list[str]) -> float | N
     srs = np.array([float(m.get("valid_daily_sharpe", math.nan)) for m in val["metrics"]])
     srs = srs[np.isfinite(srs)]
     return float(np.var(srs, ddof=1)) if len(srs) >= 2 else None
+
+
+def _latest_recommended(log_rows: pd.DataFrame, valid_period: list[str]) -> list[str]:
+    """`recommended_ids` of the latest `lab validate` run on `valid_period` (its last logged
+    row; every row of a run carries the run's list); [] without one."""
+    val = log_rows[(log_rows["stage"] == "validate")
+                   & log_rows["period"].map(lambda p: list(p) == list(valid_period))]
+    if val.empty or not isinstance(val.iloc[-1]["metrics"], dict):
+        return []
+    return [str(r) for r in val.iloc[-1]["metrics"].get("recommended_ids") or []]
 
 
 def _parity_summary(rep: dict) -> dict:
@@ -689,7 +700,9 @@ def _final_scenarios(rule, panel: Panel, s: Setup, pbo: float, n_trials: int,
 
 def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path, Path]:
     """Open the seal for `rule_id` (once per pocket x market), then evaluate it on the sealed
-    period in NautilusTrader for both capital scenarios and write the rule card."""
+    period in NautilusTrader for both capital scenarios and write the rule card. Cycle 1 opens
+    only a rule recommended by the latest `lab validate` run on the current valid period;
+    later cycles only the previous cycle's final candidates."""
     s = _setup(pocket, market)
     fams = _families(pocket)
     log = ExperimentLog(experiments_path())
@@ -706,6 +719,14 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
                        f"{vrow['period'][0]}~{vrow['period'][1]} vs now "
                        f"{s.periods.valid[0]}~{s.periods.valid[1]}): re-run `lab screen` "
                        "and `lab validate`")
+    cycle = s.record.cycle
+    if cycle == 1:           # cycle >= 2: the previous cycle's finalists (SealRegistry.open)
+        latest = _latest_recommended(rows, list(_iso(s.periods.valid)))
+        if rule_id not in latest:
+            raise LabError(f"rule {rule_id} is not recommended by the latest `lab validate` "
+                           f"run on the valid period {s.periods.valid[0]}~"
+                           f"{s.periods.valid[1]} (recommended: "
+                           f"{', '.join(latest) or 'none'}): verify --final opens only those")
     family, params = scr.iloc[-1]["family"], scr.iloc[-1]["params"]
     rule = _rule(fams, family, params, rule_id)
     n_trials = log.n_trials(pocket, market)
@@ -713,7 +734,6 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
     sr_var = _sr_var_trials(rows, list(_iso(s.periods.valid)))
 
     registry = SealRegistry(seal_path(), s.lab.criteria.max_final_candidates)
-    cycle = s.record.cycle
     allowed = None
     if cycle > 1:            # spec 7.9: re-validate only the previous cycle's final candidates
         allowed = {t.rule_id for t in registry.tickets(pocket, market) if t.cycle == cycle - 1}

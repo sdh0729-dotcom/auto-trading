@@ -69,7 +69,7 @@ def run(args):
 def first_recommended_rule_id(env: CliEnv) -> str:
     rows = ExperimentLog(env.research / "experiments.jsonl").rows("swing", "kr")
     val = rows[rows["stage"] == "validate"]
-    rec = [r for r, m in zip(val["rule_id"], val["metrics"]) if m["recommended"]]
+    rec = val.iloc[-1]["metrics"]["recommended_ids"]          # the latest validate run (P3)
     assert rec, "validate recommended no rule on the synthetic panel"
     return rec[0]
 
@@ -394,9 +394,7 @@ def test_verify_scenarios_wiring_us(cli_env, monkeypatch):
         store.save_daily("us", sym, df)
     store.save_meta("us", p.meta)
     run(["screen", "--pocket", "swing", "--market", "us", "--family", "breakout"])
-    run(["validate", "--pocket", "swing", "--market", "us", "--top", "1"])
-    rid = ExperimentLog(cli_env.research / "experiments.jsonl").rows("swing", "us").query(
-        "stage == 'validate'")["rule_id"].iloc[0]
+    rid = pipeline.validate("swing", "us", 3).recommended[0]   # P3: only recommended rules
     naut_calls, port_calls = [], []
     real_portfolio = pipeline.run_portfolio
 
@@ -821,3 +819,60 @@ def test_collect_keeps_isolating_non_consecutive_failures(cli_env, monkeypatch):
                          if int(s) % 10 else None)          # 9 failures, then one success
     s = pipeline.collect("kr", date(2016, 1, 1))
     assert len(calls) == 60 and len(s["failed"]) == 54
+
+
+# ---------------------------------------------------------------- P3: verify only recommended
+def _stop_final(monkeypatch):
+    monkeypatch.setattr(pipeline, "_final_scenarios",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop")))
+
+
+def test_validate_logs_the_run_recommendations(cli_env):
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    res = pipeline.validate("swing", "kr", 3)
+    rows = ExperimentLog(cli_env.research / "experiments.jsonl").rows("swing", "kr")
+    val = rows[rows["stage"] == "validate"]
+    assert all(m["recommended_ids"] == res.recommended for m in val["metrics"])
+
+
+def test_verify_refuses_a_rule_not_recommended_by_the_latest_validate(cli_env, monkeypatch):
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    res = pipeline.validate("swing", "kr", 3)
+    assert res.recommended
+    rows = ExperimentLog(cli_env.research / "experiments.jsonl").rows("swing", "kr")
+    pool = list(rows[rows["stage"] == "validate"]["rule_id"])
+    other = next(r for r in pool if r not in res.recommended)
+    registry = cli_env.research / "seal-registry.json"
+    _stop_final(monkeypatch)
+    with pytest.raises(pipeline.LabError, match="recommended"):
+        pipeline.verify_final("swing", "kr", other)          # validated, not recommended
+    assert not registry.exists()
+    # a later validate run recommends nothing: the earlier recommendation no longer counts
+    log = ExperimentLog(cli_env.research / "experiments.jsonl")
+    log.record("swing", "kr", "breakout", other, {}, "validate",
+               pipeline._iso(periods_of(cli_env).valid),
+               {"recommended": False, "recommended_ids": [], "validate_run": 2})
+    with pytest.raises(pipeline.LabError, match="recommended"):
+        pipeline.verify_final("swing", "kr", res.recommended[0])
+    assert not registry.exists()
+
+
+def test_verify_cycle_two_keeps_the_previous_finalist_rule(cli_env, monkeypatch):
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    rid = pipeline.validate("swing", "kr", 3).recommended[0]
+    monkeypatch.setattr(pipeline, "run_nautilus", lambda *a, **k: pd.DataFrame(columns=[
+        "symbol", "entry_date", "entry_price", "exit_date", "exit_price", "exit_reason",
+        "stop_pct", "confidence", "qty", "net_pnl"]))
+    pipeline.verify_final("swing", "kr", rid)
+    extend_store(63)
+    run(["periods", "--pocket", "swing", "--market", "kr", "--new-cycle"])
+    log = ExperimentLog(cli_env.research / "experiments.jsonl")
+    log.record("swing", "kr", "breakout", rid, {}, "validate",
+               pipeline._iso(periods_of(cli_env).valid),
+               {"recommended": False, "recommended_ids": [], "validate_run": 2})
+    _stop_final(monkeypatch)
+    with pytest.raises(RuntimeError, match="stop"):      # got past the checks: seal opened
+        pipeline.verify_final("swing", "kr", rid)
+    from autotrade.validate.seal import SealRegistry
+    assert [t.cycle for t in SealRegistry(cli_env.research / "seal-registry.json")
+            .tickets("swing", "kr")] == [1, 2]

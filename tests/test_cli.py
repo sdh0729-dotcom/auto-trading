@@ -163,10 +163,17 @@ def test_validate_records_walk_forward_portfolio_and_pbo(cli_env):
     assert set(val["rule_id"]) == pool and len(pool) > 3      # whole pool is logged
     assert all(m["pbo_candidates"] == len(pool) for m in val["metrics"])
     assert f"over {len(pool)} candidates" in r.output
+    assert "검증 기간 구간 안정성" in r.output
     per = periods_of(cli_env)
     for period, m in zip(val["period"], val["metrics"]):
         assert period == [per.valid[0].isoformat(), per.valid[1].isoformat()]
-        assert len(m["wf_test_net_sums"]) == 4
+        segs = m["valid_segments"]                  # 4 contiguous segments inside valid
+        assert len(segs) == len(m["valid_segment_net_sums"]) == 4
+        assert segs[0][0] == per.valid[0].isoformat() and segs[-1][1] == per.valid[1].isoformat()
+        assert all(date.fromisoformat(b) < date.fromisoformat(c)
+                   for (_, b), (c, _) in zip(segs, segs[1:]))
+        assert m["valid_segments_positive"] == sum(x > 0 for x in m["valid_segment_net_sums"])
+        assert not any(k.startswith("wf_") for k in m)
         assert {"valid_net_pnl", "valid_daily_sharpe", "valid_n_trades", "pbo",
                 "recommended"} <= m.keys()
         assert 0.0 <= m["pbo"] <= 1.0
@@ -597,4 +604,6 @@ def test_card_records_validate_runs_and_flags_reruns(cli_env, monkeypatch):
     assert card.validate_runs == 2
     data = json.loads(js.read_text(encoding="utf-8"))
     assert data["validate_runs"] == 2
-    assert "검증 실행 2회" in md.read_text(encoding="utf-8")
+    text = md.read_text(encoding="utf-8")
+    assert "검증 실행 2회" in text
+    assert "검증 기간 구간 안정성" in text                      # I6 label on the card

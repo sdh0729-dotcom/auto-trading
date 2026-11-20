@@ -84,4 +84,5 @@ def test_leaderboard_lists_families_and_failure_reasons(tmp_path):
     assert "min_trades" in text and "dsr" in text             # final failure reasons
     assert "거래 수 < 30" in text                             # screen drop reason
     assert "검증 순수익 ≤ 0" in text                          # validate drop reason
+    assert "검증 기간 구간 안정성" in text                    # I6 label
     assert "NBBO" in text and "상장폐지" in text              # fixed limitations

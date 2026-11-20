@@ -6,7 +6,8 @@ import pytest
 
 from autotrade.validate.seal import (SealLimitError, SealRegistry, SealReuseError, SealTicket,
                                      SealViolation)
-from autotrade.validate.split import Periods, split_periods, walk_forward_windows
+from autotrade.validate.split import (Periods, period_segments, split_periods,
+                                      walk_forward_windows)
 from tests.fixtures import make_panel
 
 DATES = pd.bdate_range("2016-01-01", periods=1000, name="date")
@@ -202,3 +203,15 @@ def test_load_sealed_rejects_ticket_of_another_sealed_period(tmp_path):
     ticket = reg.open("swing", "kr", "a", sealed=("2016-01-04", "2016-02-01"))
     with pytest.raises(SealViolation, match="sealed period"):
         reg.load_sealed(panel, periods, ticket)
+
+
+def test_period_segments_cover_the_period_contiguously():
+    start, end = date(2022, 1, 3), date(2023, 12, 29)
+    segs = period_segments(start, end, n=4)
+    assert len(segs) == 4 and segs[0][0] == start and segs[-1][1] == end
+    one = timedelta(days=1)
+    assert all(b + one == c for (_, b), (c, _) in zip(segs, segs[1:]))
+    sizes = [(b - a).days + 1 for a, b in segs]
+    assert max(sizes) - min(sizes) <= 1
+    with pytest.raises(ValueError):
+        period_segments(date(2020, 1, 1), date(2020, 1, 2), n=4)

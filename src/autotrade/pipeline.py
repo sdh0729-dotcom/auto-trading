@@ -48,13 +48,13 @@ from autotrade.validate import periods as period_store
 from autotrade.validate.pbo import pbo_cscv
 from autotrade.validate.periods import PeriodError, PeriodRecord
 from autotrade.validate.seal import SealRegistry, SealViolation
-from autotrade.validate.split import Periods, walk_forward_windows
+from autotrade.validate.split import Periods, period_segments
 from autotrade.validate.stats import max_drawdown, sharpe
 from autotrade.verify import parity_report, run_nautilus
 
 MARKETS = ("kr", "us")
 SCENARIOS = ("paper", "real")
-WALK_FORWARD_WINDOWS = 4
+VALID_SEGMENTS = 4               # "검증 기간 구간 안정성": valid cut into 4 test segments
 PBO_SPLITS = (16, 8, 4, 2)
 MAX_COMMISSION = 0.01            # a commission ratio >= 1% is almost surely a percent typo
 PARITY_MISMATCHES_KEPT = 20
@@ -411,7 +411,8 @@ def _daily_returns(res: PortfolioResult, calendar, period, capital0: float) -> p
 
 def validate(pocket: str, market: str, top: int) -> ValidateResult:
     """The pool = every rule screened on the current train period with >= MIN_TRAIN_TRADES
-    train trades (fixed; `top` does not change it): walk-forward test-segment net sums,
+    train trades (fixed; `top` does not change it): fixed-amount net sums on VALID_SEGMENTS
+    consecutive segments of the valid period ("검증 기간 구간 안정성", params fixed),
     paper portfolio on the valid period, PBO over the whole pool's valid daily returns, each
     pool rule logged as stage "validate" (the trial-variance pool of verify). `top` only
     picks the candidates printed and recommended: the first `top` by train mean_net_r;
@@ -445,17 +446,17 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     cm = _cost_model(s.market, panel.meta)
     cpk = _currency_per_krw(s.market, s.synced)
     capital = s.lab.capital["paper"]
-    windows = walk_forward_windows(t0, v1, n=WALK_FORWARD_WINDOWS)
+    segments = period_segments(v0, v1, n=VALID_SEGMENTS)
 
     metrics, returns = {}, {}
     for fam, params, rid, scr_r in zip(cands["family"], cands["params"], cands["rule_id"],
                                        cands["mean_net_r"]):
         rule = _rule(fams, fam, params, rid)
         sig = rule.signals(panel)                 # history through the valid end
-        wf = []
-        for _, _, a, b in windows:                # params fixed: test segments only
+        seg_sums = []
+        for a, b in segments:                     # params fixed; valid period only
             trades = simulate(panel, sig, elig, a, b)
-            wf.append(float(cm.net_returns(trades)["net_return"].sum()))
+            seg_sums.append(float(cm.net_returns(trades)["net_return"].sum()))
         res = run_portfolio(simulate(panel, sig, elig, v0, v1), panel, cm, s.pocket, capital,
                             cpk, False, entry_at=sig.entry_at, exit_at=sig.exit_at)
         eq = period_equity(res, cal, v0, v1, capital * cpk)
@@ -463,8 +464,9 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
         returns[rid] = rets
         metrics[rid] = {
             "family": fam, "params": params, "screen_mean_net_r": scr_r,
-            "wf_windows": [[a.isoformat(), b.isoformat()] for _, _, a, b in windows],
-            "wf_test_net_sums": wf, "wf_positive_windows": int(sum(x > 0 for x in wf)),
+            "valid_segments": [[a.isoformat(), b.isoformat()] for a, b in segments],
+            "valid_segment_net_sums": seg_sums,
+            "valid_segments_positive": int(sum(x > 0 for x in seg_sums)),
             "valid_n_trades": int(len(res.fills)),
             "valid_net_pnl": float(res.fills["net_pnl"].astype(float).sum()),
             "valid_daily_sharpe": sharpe(rets.to_numpy(), periods_per_year=1),
@@ -485,7 +487,7 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
         log.record(pocket, market, m["family"], rid, m["params"], "validate", _iso((v0, v1)),
                    {k: v for k, v in m.items() if k not in ("family", "params")})
     table = pd.DataFrame([{"rule_id": rid, **{k: metrics[rid][k] for k in (
-        "valid_net_pnl", "valid_daily_sharpe", "valid_n_trades", "wf_positive_windows",
+        "valid_net_pnl", "valid_daily_sharpe", "valid_n_trades", "valid_segments_positive",
         "recommended")}} for rid in top_ids])
     table = table.sort_values("valid_daily_sharpe", ascending=False, na_position="last",
                               kind="stable").reset_index(drop=True)

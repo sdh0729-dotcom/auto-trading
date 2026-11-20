@@ -56,9 +56,13 @@ def _fmt(v) -> str:
     return str(v)
 
 
+LABELS = {"valid_segments_positive": "검증 기간 구간 안정성 (valid_segments_positive: "
+                                      "검증 기간 4개 구간 중 순수익 > 0 구간 수)"}
+
+
 def _table(rows: dict) -> list[str]:
     out = ["| 항목 | 값 |", "|---|---|"]
-    out += [f"| {k} | {_fmt(v)} |" for k, v in rows.items()]
+    out += [f"| {LABELS.get(k, k)} | {_fmt(v)} |" for k, v in rows.items()]
     return out
 
 

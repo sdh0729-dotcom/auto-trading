@@ -1,4 +1,5 @@
-"""Train / valid / sealed period split and expanding walk-forward windows."""
+"""Train / valid / sealed period split, valid-period segments and expanding walk-forward
+windows."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -49,3 +50,15 @@ def walk_forward_windows(start: date, end: date, n: int = 4
     cuts = [start + timedelta(days=k * total // (n + 1)) for k in range(n + 2)]
     seg = [(cuts[k], cuts[k + 1] - timedelta(days=1)) for k in range(n + 1)]
     return [(start, seg[i][1], seg[i + 1][0], seg[i + 1][1]) for i in range(n)]
+
+
+def period_segments(start: date, end: date, n: int = 4) -> list[tuple[date, date]]:
+    """[start, end] (calendar days) cut into n consecutive, non-overlapping segments of
+    (near-)equal length; the first starts on `start`, the last ends on `end`."""
+    if n < 1:
+        raise ValueError(f"n must be >= 1, got {n}")
+    total = (end - start).days + 1
+    if total < n:
+        raise ValueError(f"[{start}, {end}] is too short for {n} segments")
+    cuts = [start + timedelta(days=k * total // n) for k in range(n + 1)]
+    return [(cuts[k], cuts[k + 1] - timedelta(days=1)) for k in range(n)]

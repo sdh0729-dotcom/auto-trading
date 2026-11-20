@@ -63,11 +63,15 @@ def write_leaderboard(log: ExperimentLog, pocket: str, market: str, out: Path,
     else:
         v = val.assign(_s=[_num(m, "valid_daily_sharpe") for m in val["metrics"]])
         v = v.sort_values("_s", ascending=False, na_position="last")
-        lines += ["| rule_id | 검증 순수익 | 일간 Sharpe | PBO | 추천 |", "|---|---|---|---|---|"]
+        lines += ["| rule_id | 검증 순수익 | 일간 Sharpe | 검증 기간 구간 안정성 | PBO | 추천 |",
+                  "|---|---|---|---|---|---|"]
         for rid, m in zip(v["rule_id"], v["metrics"]):
+            seg = m.get("valid_segments_positive")
+            n_seg = len(m.get("valid_segments", []))
             lines.append(f"| {rid} | {_fmt(_num(m, 'valid_net_pnl'))} | "
-                         f"{_fmt(_num(m, 'valid_daily_sharpe'))} | {_fmt(_num(m, 'pbo'))} | "
-                         f"{'예' if m.get('recommended') else ''} |")
+                         f"{_fmt(_num(m, 'valid_daily_sharpe'))} | "
+                         f"{f'{seg}/{n_seg}' if seg is not None else '-'} | "
+                         f"{_fmt(_num(m, 'pbo'))} | {'예' if m.get('recommended') else ''} |")
         lines.append("")
 
     lines += ["## 봉인 최종 판정", ""]

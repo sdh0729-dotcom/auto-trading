@@ -117,9 +117,12 @@ def screen(pocket: str = typer.Option("swing"), market: str = typer.Option(..., 
 def validate(pocket: str = typer.Option("swing"),
              market: str = typer.Option(..., help="kr | us"),
              top: int = typer.Option(10, help="screened candidates to validate")):
-    """Walk-forward + paper portfolio on the valid period, PBO, recommendations."""
+    """Valid-period segment stability + paper portfolio on the valid period, PBO,
+    recommendations."""
     res = pipeline.validate(pocket, market, top)
     _show(res.table)
+    typer.echo(f"valid_segments_positive = 검증 기간 구간 안정성: 검증 기간 "
+               f"{pipeline.VALID_SEGMENTS}개 구간 중 순수익 > 0인 구간 수")
     typer.echo(f"PBO = {res.pbo:.3f} over {res.n_pool} candidates (all screened rules with "
                f">= {pipeline.MIN_TRAIN_TRADES} train trades; --top only limits the list above)")
     typer.echo("recommended for verify --final: "

@@ -15,6 +15,7 @@ to the period itself.
 from __future__ import annotations
 
 import logging
+import os
 import math
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
@@ -756,6 +757,7 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
                      for scen, d in scenarios.items()}
     final_metrics["verdict"] = verdict
     final_metrics["validate_runs"] = s.record.validate_runs
+    final_metrics["cycle"] = cycle
     final_metrics["parity_matched_share"] = {k: p["matched_share"] for k, p in parity.items()}
     log.record(pocket, market, family, rule_id, params, "final", _iso(s.periods.sealed),
                final_metrics)
@@ -766,7 +768,7 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
         metrics_by_stage={"screen": scr.iloc[-1]["metrics"], "validate": vrow["metrics"]},
         scenarios=scenarios, verdict=verdict, parity=parity,
         limitations=limitations(s.market, family=family),
-        validate_runs=s.record.validate_runs, currency=s.market.currency)
+        validate_runs=s.record.validate_runs, currency=s.market.currency, cycle=cycle)
     md, js = write_rule_card(card, cards_dir())
     return card, md, js
 
@@ -798,9 +800,10 @@ def periods(pocket: str, market: str, new_cycle: bool = False) -> dict:
 # ---------------------------------------------------------------- report / journal
 def report(pocket: str, market: str) -> Path:
     _check_market(market)
-    return write_leaderboard(ExperimentLog(experiments_path()), pocket, market,
-                             leaderboard_path(pocket, market),
-                             limitations=limitations(load_market_raw(market)))
+    out = leaderboard_path(pocket, market)
+    return write_leaderboard(ExperimentLog(experiments_path()), pocket, market, out,
+                             limitations=limitations(load_market_raw(market)),
+                             cards_rel=Path(os.path.relpath(cards_dir(), out.parent)).as_posix())
 
 
 def journal(memo: str, now: datetime | None = None) -> Path:

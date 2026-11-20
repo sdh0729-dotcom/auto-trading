@@ -1,4 +1,5 @@
-"""Rule cards: research/rule-cards/<pocket>-<market>-<rule_id with ':' -> '-'>.md + .json."""
+"""Rule cards: research/rule-cards/<pocket>-<market>-c<cycle>-<rule_id with ':' -> '-'>.md +
+.json (one per period cycle, so a re-validation cycle never overwrites an earlier card)."""
 from __future__ import annotations
 
 import json
@@ -35,10 +36,11 @@ class RuleCard:
     limitations: list[str]
     validate_runs: int = 1  # `lab validate` runs on these periods before the seal opened
     currency: str = "KRW"   # the market's currency: P&L and capital_ccy are in it
+    cycle: int = 1          # period cycle the seal was opened in (validate.periods)
 
 
-def card_stem(pocket: str, market: str, rule_id: str) -> str:
-    return f"{pocket}-{market}-{rule_id.replace(':', '-')}"
+def card_stem(pocket: str, market: str, rule_id: str, cycle: int = 1) -> str:
+    return f"{pocket}-{market}-c{int(cycle)}-{rule_id.replace(':', '-')}"
 
 
 def _fmt(v) -> str:
@@ -79,7 +81,8 @@ def _table(rows: dict, currency: str = "KRW") -> list[str]:
 
 
 def render_markdown(card: RuleCard) -> str:
-    lines = [f"# 규칙 카드: {card.rule_id} ({card.pocket} / {card.market})", "",
+    lines = [f"# 규칙 카드: {card.rule_id} ({card.pocket} / {card.market}, cycle {card.cycle})",
+             "",
              "## 판정", ""]
     lines += [f"- **{k}**: {_fmt(v)}" for k, v in card.verdict.items()]
     for scen, s in card.scenarios.items():
@@ -111,7 +114,7 @@ def render_markdown(card: RuleCard) -> str:
 def write_rule_card(card: RuleCard, out_dir: Path) -> tuple[Path, Path]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = card_stem(card.pocket, card.market, card.rule_id)
+    stem = card_stem(card.pocket, card.market, card.rule_id, card.cycle)
     md, js = out_dir / f"{stem}.md", out_dir / f"{stem}.json"
     md.write_text(render_markdown(card), encoding="utf-8")
     js.write_text(json.dumps(asdict(card), default=_default, ensure_ascii=False, indent=2),

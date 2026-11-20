@@ -26,8 +26,8 @@ def sample_card() -> RuleCard:
 
 def test_card_files_and_limitations(tmp_path):
     md, js = write_rule_card(sample_card(), tmp_path)
-    assert md.name == "swing-kr-breakout-1a2b3c4d.md"
-    assert js.name == "swing-kr-breakout-1a2b3c4d.json"
+    assert md.name == "swing-kr-c1-breakout-1a2b3c4d.md"         # P4: cycle in the name
+    assert js.name == "swing-kr-c1-breakout-1a2b3c4d.json"
     text = md.read_text(encoding="utf-8")
     assert "상장폐지" in text and "NBBO" in text
     data = json.loads(js.read_text(encoding="utf-8"))
@@ -105,3 +105,28 @@ def test_card_labels_currency_of_capital_and_pnl(tmp_path):
     assert "sealed_net_pnl (USD)" in text and "valid_net_pnl (USD)" in text
     assert "capital_krw (KRW)" in text and "capital_ccy (USD)" in text
     assert json.loads(js.read_text(encoding="utf-8"))["currency"] == "USD"
+
+
+def test_card_file_names_carry_the_cycle(tmp_path):
+    from dataclasses import replace
+    md1, js1 = write_rule_card(sample_card(), tmp_path)
+    md2, js2 = write_rule_card(replace(sample_card(), cycle=2), tmp_path)
+    assert md2.name == "swing-kr-c2-breakout-1a2b3c4d.md"
+    assert js2.name == "swing-kr-c2-breakout-1a2b3c4d.json"
+    assert md1.exists() and js1.exists()                  # cycle 2 does not overwrite cycle 1
+    assert json.loads(js2.read_text(encoding="utf-8"))["cycle"] == 2
+    assert "cycle 2" in md2.read_text(encoding="utf-8")
+
+
+def test_leaderboard_lists_and_links_final_verdicts_per_cycle(tmp_path):
+    log = ExperimentLog(tmp_path / "experiments.jsonl")
+    for cycle, period, passed in ((1, ("2024-01-02", "2025-12-30"), False),
+                                  (2, ("2026-01-02", "2026-06-30"), True)):
+        log.record("swing", "kr", "breakout", "breakout:00000000", {"n": 0}, "final", period,
+                   {"paper": {"passed": passed, "failed": [] if passed else ["dsr"]},
+                    "real": {"passed": False, "failed": ["min_trades"]}, "cycle": cycle})
+    out = tmp_path / "leaderboard-swing-kr.md"
+    write_leaderboard(log, "swing", "kr", out, limitations=[])
+    text = out.read_text(encoding="utf-8")
+    assert "(rule-cards/swing-kr-c1-breakout-00000000.md)" in text
+    assert "(rule-cards/swing-kr-c2-breakout-00000000.md)" in text

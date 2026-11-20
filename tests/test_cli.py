@@ -876,3 +876,25 @@ def test_verify_cycle_two_keeps_the_previous_finalist_rule(cli_env, monkeypatch)
     from autotrade.validate.seal import SealRegistry
     assert [t.cycle for t in SealRegistry(cli_env.research / "seal-registry.json")
             .tickets("swing", "kr")] == [1, 2]
+
+
+# ---------------------------------------------------------------- P4: cards per cycle
+def test_cycle_two_verify_keeps_the_cycle_one_card(cli_env, monkeypatch):
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    rid = pipeline.validate("swing", "kr", 3).recommended[0]
+    monkeypatch.setattr(pipeline, "run_nautilus", lambda *a, **k: pd.DataFrame(columns=[
+        "symbol", "entry_date", "entry_price", "exit_date", "exit_price", "exit_reason",
+        "stop_pct", "confidence", "qty", "net_pnl"]))
+    _, md1, js1 = pipeline.verify_final("swing", "kr", rid)
+    first = js1.read_text(encoding="utf-8")
+    extend_store(63)
+    run(["periods", "--pocket", "swing", "--market", "kr", "--new-cycle"])
+    _, md2, js2 = pipeline.verify_final("swing", "kr", rid)
+    stem = rid.replace(":", "-")
+    assert (md1.name, md2.name) == (f"swing-kr-c1-{stem}.md", f"swing-kr-c2-{stem}.md")
+    assert js1.read_text(encoding="utf-8") == first
+    rows = ExperimentLog(cli_env.research / "experiments.jsonl").rows("swing", "kr")
+    assert [m["cycle"] for m in rows[rows["stage"] == "final"]["metrics"]] == [1, 2]
+    board = pipeline.report("swing", "kr").read_text(encoding="utf-8")
+    assert f"rule-cards/swing-kr-c1-{stem}.md" in board
+    assert f"rule-cards/swing-kr-c2-{stem}.md" in board

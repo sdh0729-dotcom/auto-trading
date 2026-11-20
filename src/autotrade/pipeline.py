@@ -161,16 +161,31 @@ def _validate_runs_logged(pocket: str, market: str, valid: tuple[date, date]) ->
     return max(runs, default=0)
 
 
+def _logged_period(rows: pd.DataFrame, stage: str) -> list[str] | None:
+    """Period [start, end] of the latest `stage` row in the experiment log, or None."""
+    rows = rows[rows["stage"] == stage]
+    return [str(x) for x in rows.iloc[-1]["period"]] if len(rows) else None
+
+
 def _new_periods(pocket: str, market: str, lab: LabConfig) -> PeriodRecord:
     """The period record for a missing file: rebuilt from the seal tickets when some exist
-    (a fresh split could move over an opened seal), else split from the stored dates."""
+    (a fresh split could move over an opened seal), else split from the stored dates. A
+    rebuilt train / valid must equal the periods of the latest logged screen / validate."""
     tickets = SealRegistry(seal_path()).tickets(pocket, market)
     cal = trading_dates(market, lab.swing_start, date.today())
     if len(cal) == 0:
         raise LabError(f"no daily data for {market}: run `lab collect --market {market}` first")
     if tickets:
+        rows = ExperimentLog(experiments_path()).rows(pocket, market)
+        logged = {st: _logged_period(rows, st) for st in ("screen", "validate")}
         try:
-            rec = period_store.rebuild_record(pocket, market, tickets, cal, lab.split)
+            rec = period_store.rebuild_record(pocket, market, tickets, cal, lab.split,
+                                              train=logged["screen"],
+                                              valid=logged["validate"])
+            missing = [st for st, p in logged.items() if p is None]
+            if missing:
+                raise PeriodError(f"no logged {' / '.join(missing)} period to check the "
+                                  "rebuilt train / valid against")
         except PeriodError as e:
             raise LabError(f"{periods_path(pocket, market)} is missing and the seal tickets "
                            f"of {pocket}/{market} cannot rebuild it ({e}): restore the periods "

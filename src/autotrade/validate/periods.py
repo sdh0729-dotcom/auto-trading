@@ -62,13 +62,15 @@ def new_cycle(rec: PeriodRecord, dates: pd.DatetimeIndex) -> PeriodRecord:
 
 
 def rebuild_record(pocket: str, market: str, tickets, dates: pd.DatetimeIndex, fractions,
-                   validate_runs: int = 0) -> PeriodRecord:
+                   validate_runs: int = 0, train=None, valid=None) -> PeriodRecord:
     """A lost period file rebuilt from the seal tickets of `pocket` x `market` instead of a
     fresh split (which data collected since could move over an opened seal). Cycle 1 is
     re-split from the stored trading `dates` through the cycle-1 tickets' data cutoff, each
     later cycle is `new_cycle` through its tickets' cutoff; every result must reproduce the
-    sealed period the tickets opened. Raises PeriodError when the tickets lack the sealed
-    period / data cutoff, disagree with each other, or do not match the stored dates."""
+    sealed period the tickets opened, and its train / valid must equal `train` / `valid`
+    (ISO [start, end] pairs, e.g. the periods last logged by screen / validate) where given.
+    Raises PeriodError when the tickets lack the sealed period / data cutoff, disagree with
+    each other, or the rebuilt periods do not match."""
     by_cycle: dict[int, set] = {}
     for t in tickets:
         if not (t.sealed_start and t.sealed_end and t.data_cutoff):
@@ -99,6 +101,11 @@ def rebuild_record(pocket: str, market: str, tickets, dates: pd.DatetimeIndex, f
             raise PeriodError(f"cycle {cycle}: the stored dates through {cutoff} give sealed "
                               f"{got[0]}~{got[1]} (cutoff {got[2]}), the tickets opened "
                               f"{s0}~{s1} (cutoff {cutoff})")
+    for name, want in (("train", train), ("valid", valid)):
+        got = _iso(getattr(rec.periods, name))
+        if want is not None and got != [str(want[0]), str(want[1])]:
+            raise PeriodError(f"the rebuilt {name} {got[0]}~{got[1]} differs from the logged "
+                              f"{name} {want[0]}~{want[1]}")
     return replace(rec, validate_runs=int(validate_runs))
 
 

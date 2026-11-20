@@ -761,6 +761,9 @@ def test_lost_periods_file_is_rebuilt_in_a_later_cycle(cli_env):
     _open_ticket(cli_env, "breakout:x", per.sealed, per.sealed[1])
     extend_store(70)
     run(["periods", "--pocket", "swing", "--market", "kr", "--new-cycle"])
+    ExperimentLog(cli_env.research / "experiments.jsonl").record(     # rebuild checks it
+        "swing", "kr", "breakout", "breakout:x", {}, "validate", pipeline._iso(per.valid),
+        {"valid_daily_sharpe": 0.1, "validate_run": 1})
     before = json.loads(periods_file(cli_env).read_text(encoding="utf-8"))
     sealed2 = tuple(date.fromisoformat(x) for x in before["sealed"])
     _open_ticket(cli_env, "breakout:x", sealed2, sealed2[1], cycle=2)
@@ -1003,3 +1006,44 @@ def test_collect_writes_the_supplement_record_and_reports_show_it(cli_env, monke
     board = pipeline.report("swing", "kr").read_text(encoding="utf-8")
     assert "보충 기록 없음" not in board
     assert "받음 1" in board and "실패 1" in board and "건너뜀 1" in board
+
+
+# ---------------------------------------------------------------- review fixes (round 1)
+def _insert_date_everywhere(day: str, market: str = "kr") -> None:
+    """A stray bar on `day` for every symbol: the calendar keeps it as a trading date."""
+    for f in sorted((store.data_root() / market / "1d").glob("*.parquet")):
+        df = store.load_daily(market, f.stem)
+        extra = pd.DataFrame([df.iloc[0].to_dict()], index=pd.DatetimeIndex([day]))
+        store.save_daily(market, f.stem, pd.concat([df, extra]).sort_index())
+
+
+def test_rebuild_refuses_train_valid_that_differ_from_the_logged_periods(cli_env):
+    from autotrade.validate.split import split_periods
+    extend_store(1)                                  # 1001 business days
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    per = split_periods(store.trading_dates("kr", date(2016, 1, 1), date(2100, 1, 1)))
+    _open_ticket(cli_env, "breakout:x", per.sealed, per.sealed[1])
+    ExperimentLog(cli_env.research / "experiments.jsonl").record(
+        "swing", "kr", "breakout", "breakout:x", {}, "validate", pipeline._iso(per.valid),
+        {"valid_daily_sharpe": 0.1, "validate_run": 3})
+    periods_file(cli_env).unlink()
+    _insert_date_everywhere("2016-03-05")       # a Saturday inside train: sealed unchanged,
+    moved = split_periods(store.trading_dates("kr", date(2016, 1, 1), per.sealed[1]))
+    assert moved.sealed == per.sealed and moved.train != per.train
+    r = CliRunner().invoke(app, ["screen", "--pocket", "swing", "--market", "kr",
+                                 "--family", "breakout"])
+    assert r.exit_code == 1 and "Traceback" not in r.output
+    assert len(r.output.strip().splitlines()) == 1
+    assert "train" in r.output and per.train[1].isoformat() in r.output
+    assert not periods_file(cli_env).exists()
+
+
+def test_rebuild_needs_logged_screen_and_validate_periods(cli_env):
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    per = periods_of(cli_env)
+    _open_ticket(cli_env, "breakout:x", per.sealed, per.sealed[1])
+    periods_file(cli_env).unlink()                  # screen logged, no validate row
+    r = CliRunner().invoke(app, ["screen", "--pocket", "swing", "--market", "kr",
+                                 "--family", "breakout"])
+    assert r.exit_code == 1 and "validate" in r.output
+    assert not periods_file(cli_env).exists()

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -387,9 +387,10 @@ def screen(pocket: str, market: str, family: str = "all") -> pd.DataFrame:
 # ---------------------------------------------------------------- validate
 @dataclass
 class ValidateResult:
-    table: pd.DataFrame
-    pbo: float
+    table: pd.DataFrame          # the `top` candidates
+    pbo: float                   # over the whole pool
     recommended: list[str]
+    n_pool: int = 0
 
 
 def _pbo(perf: pd.DataFrame) -> float:
@@ -409,10 +410,13 @@ def _daily_returns(res: PortfolioResult, calendar, period, capital0: float) -> p
 
 
 def validate(pocket: str, market: str, top: int) -> ValidateResult:
-    """Top-`top` screened rules (mean_net_r, >= MIN_TRAIN_TRADES train trades): walk-forward
-    test-segment net sums over train+valid, paper portfolio on the valid period, PBO over the
-    candidates' valid daily returns; recommend up to max_final_candidates with valid net_pnl
-    > 0 by valid daily Sharpe. Each candidate is logged as stage "validate"."""
+    """The pool = every rule screened on the current train period with >= MIN_TRAIN_TRADES
+    train trades (fixed; `top` does not change it): walk-forward test-segment net sums,
+    paper portfolio on the valid period, PBO over the whole pool's valid daily returns, each
+    pool rule logged as stage "validate" (the trial-variance pool of verify). `top` only
+    picks the candidates printed and recommended: the first `top` by train mean_net_r;
+    recommend up to max_final_candidates of them with valid net_pnl > 0 by valid daily
+    Sharpe. Every run increments the period file's validate_runs counter."""
     if top < 1:
         raise LabError("--top must be >= 1")
     s = _setup(pocket, market)
@@ -428,9 +432,10 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     scr = scr.assign(n_trades=[m.get("n_trades", 0) for m in scr["metrics"]],
                      mean_net_r=[m.get("mean_net_r", math.nan) for m in scr["metrics"]])
     cands = scr[scr["n_trades"] >= MIN_TRAIN_TRADES].sort_values(
-        "mean_net_r", ascending=False, na_position="last", kind="stable").head(top)
+        "mean_net_r", ascending=False, na_position="last", kind="stable")
     if cands.empty:
         raise LabError(f"no screened rule has >= {MIN_TRAIN_TRADES} train trades")
+    top_ids = list(cands["rule_id"].head(top))
 
     (t0, _), (v0, v1) = s.periods.train, s.periods.valid
     _refuse_opened_overlap(pocket, market, t0, v1, "validate")
@@ -467,21 +472,24 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
             "valid_mdd": max_drawdown(eq), "scenario": "paper", "capital": capital,
         }
     pbo = _pbo(pd.DataFrame(returns).fillna(0.0))
-    ranked = sorted((rid for rid, m in metrics.items() if m["valid_net_pnl"] > 0),
+    ranked = sorted((rid for rid in top_ids if metrics[rid]["valid_net_pnl"] > 0),
                     key=lambda r: (-metrics[r]["valid_daily_sharpe"]
                                    if np.isfinite(metrics[r]["valid_daily_sharpe"])
                                    else math.inf))
     recommended = ranked[: s.lab.criteria.max_final_candidates]
+    rec = replace(s.record, validate_runs=s.record.validate_runs + 1)
+    period_store.save_record(periods_path(pocket, market), rec)
     for rid, m in metrics.items():
-        m.update(pbo=pbo, pbo_candidates=len(metrics), recommended=rid in recommended)
+        m.update(pbo=pbo, pbo_candidates=len(metrics), in_top=rid in top_ids,
+                 recommended=rid in recommended, validate_run=rec.validate_runs)
         log.record(pocket, market, m["family"], rid, m["params"], "validate", _iso((v0, v1)),
                    {k: v for k, v in m.items() if k not in ("family", "params")})
-    table = pd.DataFrame([{"rule_id": rid, **{k: m[k] for k in (
+    table = pd.DataFrame([{"rule_id": rid, **{k: metrics[rid][k] for k in (
         "valid_net_pnl", "valid_daily_sharpe", "valid_n_trades", "wf_positive_windows",
-        "recommended")}} for rid, m in metrics.items()])
+        "recommended")}} for rid in top_ids])
     table = table.sort_values("valid_daily_sharpe", ascending=False, na_position="last",
                               kind="stable").reset_index(drop=True)
-    return ValidateResult(table, pbo, recommended)
+    return ValidateResult(table, pbo, recommended, len(metrics))
 
 
 # ---------------------------------------------------------------- verify --final
@@ -523,9 +531,12 @@ def nautilus_result(trades: pd.DataFrame, panel: Panel, cost_model: CostModel,
     return PortfolioResult(equity, fills, pd.DataFrame())
 
 
-def _sr_var_trials(log_rows: pd.DataFrame) -> float | None:
-    """Variance (ddof=1) of the validate-stage daily Sharpes (latest per rule); None if < 2."""
-    val = log_rows[log_rows["stage"] == "validate"].drop_duplicates("rule_id", keep="last")
+def _sr_var_trials(log_rows: pd.DataFrame, valid_period: list[str]) -> float | None:
+    """Variance (ddof=1) of the validate-stage daily Sharpes on `valid_period` (latest per
+    rule; validate logs the whole screened pool); None if < 2."""
+    val = log_rows[(log_rows["stage"] == "validate")
+                   & log_rows["period"].map(lambda p: list(p) == list(valid_period))]
+    val = val.drop_duplicates("rule_id", keep="last")
     srs = np.array([float(m.get("valid_daily_sharpe", math.nan)) for m in val["metrics"]])
     srs = srs[np.isfinite(srs)]
     return float(np.var(srs, ddof=1)) if len(srs) >= 2 else None
@@ -610,7 +621,7 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
     rule = _rule(fams, family, params, rule_id)
     n_trials = log.n_trials(pocket, market)
     pbo = float(vrow["metrics"].get("pbo", math.nan))
-    sr_var = _sr_var_trials(rows)
+    sr_var = _sr_var_trials(rows, list(_iso(s.periods.valid)))
 
     registry = SealRegistry(seal_path(), s.lab.criteria.max_final_candidates)
     cycle = s.record.cycle
@@ -634,6 +645,7 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
                             "sr_var_trials_source": d["sr_var_trials_source"]}
                      for scen, d in scenarios.items()}
     final_metrics["verdict"] = verdict
+    final_metrics["validate_runs"] = s.record.validate_runs
     final_metrics["parity_matched_share"] = {k: p["matched_share"] for k, p in parity.items()}
     log.record(pocket, market, family, rule_id, params, "final", _iso(s.periods.sealed),
                final_metrics)
@@ -643,7 +655,8 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
         periods={k: list(_iso(getattr(s.periods, k))) for k in ("train", "valid", "sealed")},
         metrics_by_stage={"screen": scr.iloc[-1]["metrics"], "validate": vrow["metrics"]},
         scenarios=scenarios, verdict=verdict, parity=parity,
-        limitations=limitations(s.market, family=family))
+        limitations=limitations(s.market, family=family),
+        validate_runs=s.record.validate_runs)
     md, js = write_rule_card(card, cards_dir())
     return card, md, js
 

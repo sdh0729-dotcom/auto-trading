@@ -120,7 +120,8 @@ def validate(pocket: str = typer.Option("swing"),
     """Walk-forward + paper portfolio on the valid period, PBO, recommendations."""
     res = pipeline.validate(pocket, market, top)
     _show(res.table)
-    typer.echo(f"PBO = {res.pbo:.3f} over {len(res.table)} candidates")
+    typer.echo(f"PBO = {res.pbo:.3f} over {res.n_pool} candidates (all screened rules with "
+               f">= {pipeline.MIN_TRAIN_TRADES} train trades; --top only limits the list above)")
     typer.echo("recommended for verify --final: "
                + (", ".join(res.recommended) if res.recommended else "(none)"))
 

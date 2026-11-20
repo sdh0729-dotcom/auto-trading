@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 import yaml
@@ -154,10 +155,14 @@ def test_screen_and_validate_never_load_sealed_prices(cli_env, monkeypatch):
 
 def test_validate_records_walk_forward_portfolio_and_pbo(cli_env):
     run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
-    run(["validate", "--pocket", "swing", "--market", "kr", "--top", "3"])
+    r = run(["validate", "--pocket", "swing", "--market", "kr", "--top", "3"])
     rows = ExperimentLog(cli_env.research / "experiments.jsonl").rows("swing", "kr")
     val = rows[rows["stage"] == "validate"]
-    assert len(val) == 3
+    scr = rows[rows["stage"] == "screen"]
+    pool = {rid for rid, m in zip(scr["rule_id"], scr["metrics"]) if m["n_trades"] >= 30}
+    assert set(val["rule_id"]) == pool and len(pool) > 3      # whole pool is logged
+    assert all(m["pbo_candidates"] == len(pool) for m in val["metrics"])
+    assert f"over {len(pool)} candidates" in r.output
     per = periods_of(cli_env)
     for period, m in zip(val["period"], val["metrics"]):
         assert period == [per.valid[0].isoformat(), per.valid[1].isoformat()]
@@ -168,12 +173,16 @@ def test_validate_records_walk_forward_portfolio_and_pbo(cli_env):
     assert len({m["pbo"] for m in val["metrics"]}) == 1         # one PBO for the run
     rec = [m for m in val["metrics"] if m["recommended"]]
     assert len(rec) <= 3 and all(m["valid_net_pnl"] > 0 for m in rec)
-    # candidates were the top screened by mean_net_r with >= 30 train trades
-    scr = rows[rows["stage"] == "screen"]
+    # --top picks the candidates printed / recommended: top screened by mean_net_r with
+    # >= 30 train trades
     ok = [(m["mean_net_r"], r) for r, m in zip(scr["rule_id"], scr["metrics"])
           if m["n_trades"] >= 30]
     top3 = [r for _, r in sorted(ok, reverse=True)[:3]]
-    assert set(val["rule_id"]) == set(top3)
+    assert {rid for rid, m in zip(val["rule_id"], val["metrics"]) if m["in_top"]} == set(top3)
+    assert {rid for rid, m in zip(val["rule_id"], val["metrics"]) if m["recommended"]} \
+        <= set(top3)
+    shown = [line.split()[0] for line in r.output.splitlines()[1:4]]
+    assert set(shown) == set(top3)
 
 
 def test_verify_opens_seal_before_loading_sealed_data(cli_env, monkeypatch):
@@ -410,8 +419,8 @@ def test_verify_scenarios_wiring_us(cli_env, monkeypatch):
     assert all(c[3] == timing for c in port_calls)
     assert card.scenarios["real"]["fractional"] is True
     assert card.scenarios["paper"]["n_data_end"] == 1           # data_end exits counted
-    # only one validate row -> sr_var_trials falls back to the squared sealed Sharpe
-    assert card.scenarios["paper"]["sr_var_trials_source"] == "sealed_sr_squared"
+    # the whole screened pool was validated -> trial variance from its validate Sharpes
+    assert card.scenarios["paper"]["sr_var_trials_source"] == "validate_daily_sharpes"
 
 
 def test_nautilus_result_equity_matches_portfolio():
@@ -548,3 +557,44 @@ def test_limited_collect_blocks_research_until_a_full_collect(cli_env, monkeypat
     run(["collect", "--market", "kr"])                   # full collect clears the marker
     assert not marker.exists()
     run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+
+
+def test_pbo_and_trial_variance_pool_does_not_depend_on_top(cli_env):
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    log = ExperimentLog(cli_env.research / "experiments.jsonl")
+    valid = list(pipeline._iso(periods_of(cli_env).valid))
+    a = pipeline.validate("swing", "kr", 1)
+    var_a = pipeline._sr_var_trials(log.rows("swing", "kr"), valid)
+    b = pipeline.validate("swing", "kr", 6)
+    var_b = pipeline._sr_var_trials(log.rows("swing", "kr"), valid)
+    assert a.pbo == b.pbo and len(a.table) == 1 and len(b.table) == 6
+    assert var_a is not None and var_a == pytest.approx(var_b)
+    rec = json.loads(periods_file(cli_env).read_text(encoding="utf-8"))
+    assert rec["validate_runs"] == 2
+
+
+def test_sr_var_trials_uses_current_valid_period_only(cli_env):
+    log = ExperimentLog(cli_env.research / "experiments.jsonl")
+    for rid, sr, period in (("a", 0.1, ("2020-01-01", "2020-12-31")),
+                            ("b", 0.3, ("2020-01-01", "2020-12-31")),
+                            ("c", 9.0, ("2019-01-01", "2019-12-31"))):   # older periods
+        log.record("swing", "kr", "breakout", rid, {}, "validate", period,
+                   {"valid_daily_sharpe": sr})
+    rows = log.rows("swing", "kr")
+    assert pipeline._sr_var_trials(rows, ["2020-01-01", "2020-12-31"]) == \
+        pytest.approx(np.var([0.1, 0.3], ddof=1))
+
+
+def test_card_records_validate_runs_and_flags_reruns(cli_env, monkeypatch):
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    run(["validate", "--pocket", "swing", "--market", "kr", "--top", "3"])
+    run(["validate", "--pocket", "swing", "--market", "kr", "--top", "5"])
+    rid = first_recommended_rule_id(cli_env)
+    monkeypatch.setattr(pipeline, "run_nautilus", lambda *a, **k: pd.DataFrame(columns=[
+        "symbol", "entry_date", "entry_price", "exit_date", "exit_price", "exit_reason",
+        "stop_pct", "confidence", "qty", "net_pnl"]))
+    card, md, js = pipeline.verify_final("swing", "kr", rid)
+    assert card.validate_runs == 2
+    data = json.loads(js.read_text(encoding="utf-8"))
+    assert data["validate_runs"] == 2
+    assert "검증 실행 2회" in md.read_text(encoding="utf-8")

@@ -33,6 +33,7 @@ class RuleCard:
     verdict: dict           # "② 모의 자격" / "실돈 자격" -> bool
     parity: dict            # Scenario -> parity_report summary
     limitations: list[str]
+    validate_runs: int = 1  # `lab validate` runs on these periods before the seal opened
 
 
 def card_stem(pocket: str, market: str, rule_id: str) -> str:
@@ -67,6 +68,11 @@ def render_markdown(card: RuleCard) -> str:
     lines += [f"- **{k}**: {_fmt(v)}" for k, v in card.verdict.items()]
     for scen, s in card.scenarios.items():
         lines.append(f"- {scen} 탈락 항목: {_fmt(list(s.get('failed', [])))}")
+    if card.validate_runs > 1:
+        lines.append(f"- ⚠ 검증 실행 {card.validate_runs}회 — 같은 검증 기간을 여러 번 보고 "
+                     "골랐을 수 있음 (선택 편향 주의)")
+    else:
+        lines.append(f"- 검증 실행 {card.validate_runs}회")
     lines += ["", "## 규칙", "", f"- 계열: {card.family}",
               f"- 파라미터: `{json.dumps(card.params, ensure_ascii=False, sort_keys=True)}`",
               f"- 확신도 산식: {card.confidence_formula}", "", "## 기간", ""]

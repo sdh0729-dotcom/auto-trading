@@ -33,11 +33,12 @@ from autotrade.config import (ConfigError, LabConfig, MarketConfig, PocketConfig
                               load_pocket, load_synced, repo_root)
 from autotrade.costs import CostModel
 from autotrade.data.collect import collect_daily, collect_meta, market_today
-from autotrade.data.delisted_kr import save_supplement_record, supplement_delisted_kr
+from autotrade.data.delisted_kr import (KindError, add_delisted_meta, kind_delisted,
+                                        save_supplement_record, supplement_delisted_kr)
 from autotrade.data.krx_overlay import refresh_overlays, save_overlay_record
 from autotrade.data.quality import check_daily, hard_issues
 from autotrade.data.store import (calendar, data_root, load_bars, load_daily, load_panel,
-                                  stored_symbols, trading_dates)
+                                  save_meta, stored_symbols, trading_dates)
 from autotrade.report import (CONFIDENCE_FORMULAS, RuleCard, limitations, write_leaderboard,
                               write_rule_card)
 from autotrade.rules.registry import SWING_FAMILIES
@@ -416,6 +417,14 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
     client = _client()
     try:
         meta = collect_meta(client, market)
+        if mc.delisted_supplement:      # Toss lists no delisted KR symbols: KIND does
+            try:
+                meta = add_delisted_meta(meta, kind_delisted(start))
+            except (KindError, httpx.HTTPError) as e:
+                raise LabError(f"collect failed: KIND delisting list unavailable "
+                               f"({type(e).__name__}); without it the delisted supplement "
+                               "would be empty (survivorship bias)") from e
+            save_meta(market, meta)
         syms = [str(s) for s in meta.index]
         first = [s for s in mc.always_include if s in set(syms)]
         ordered = first + sorted(s for s in syms if s not in set(first))

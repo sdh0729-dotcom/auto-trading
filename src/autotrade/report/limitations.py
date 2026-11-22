@@ -16,7 +16,8 @@ def _supplement_line(market: str) -> str:
     n = {k: rec.get(k, "?") for k in ("requested", "fetched", "empty", "failed", "skipped")}
     return (f"상장폐지 종목({market}): {rec.get('date', '?')} 수집의 pykrx 일봉 보충 — 대상 "
             f"{n['requested']}, 받음 {n['fetched']}, 빈 응답 {n['empty']}, 실패 {n['failed']}, "
-            f"건너뜀 {n['skipped']}. 받지 못한 상장폐지 종목은 빠져 있어 생존 편향이 남을 수 "
+            f"건너뜀 {n['skipped']}. 대상 목록은 KIND 상장폐지 현황(코스피·코스닥 보통주만 — 상장폐지 "
+            "ETF·우선주는 없음)이다. 받지 못한 상장폐지 종목은 빠져 있어 생존 편향이 남을 수 "
             "있다.")
 
 

@@ -1,6 +1,5 @@
 # Tick table (upper bound exclusive, tick). Last bound .inf.
-# unverified against KRX official — verify in Task 15
-# (official page https://regulation.krx.co.kr was reachable but the table was not machine-readable)
+# verified 2026-11-22 against the KRX 2023 tick-size revision (research/journal/2026-11-22.md)
 market: kr
 currency: KRW
 sell_tax_rate: {stock: 0.0020, etf: 0.0}

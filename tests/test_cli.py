@@ -364,6 +364,41 @@ def test_collect_kr_refreshes_krx_overlay_for_stored_toss_symbols(cli_env, monke
     assert load_overlay_record()["requested"] == 1
 
 
+def test_collect_kr_adds_kind_delisted_symbols_to_the_supplement(cli_env, monkeypatch):
+    meta = pd.DataFrame({"name": ["X"], "delisted": [False]},
+                        index=pd.Index(["000010"], name="symbol"))
+    kind = pd.DataFrame({"name": ["Gone"], "market_board": ["KOSDAQ"],
+                         "delisted_on": ["2019-05-02"]}, index=pd.Index(["053810"], name="symbol"))
+    monkeypatch.setattr(pipeline, "make_client_from_env", lambda path: object())
+    monkeypatch.setattr(pipeline, "collect_meta", lambda client, market: meta)
+    monkeypatch.setattr(pipeline, "kind_delisted", lambda since, until=None: kind)
+    monkeypatch.setattr(pipeline, "collect_daily", lambda client, market, symbol, start: 0)
+    seen = {}
+
+    def fake_supplement(start, symbols=None):
+        seen["symbols"] = symbols
+        from autotrade.data.delisted_kr import SupplementReport
+        return SupplementReport(fetched=1)
+    monkeypatch.setattr(pipeline, "supplement_delisted_kr", fake_supplement)
+    pipeline.collect("kr", date(2016, 1, 1))
+    assert seen["symbols"] == ["053810"]
+    assert bool(store.load_meta("kr").loc["053810", "delisted"])
+
+
+def test_collect_kr_stops_when_kind_is_unavailable(cli_env, monkeypatch):
+    from autotrade.data.delisted_kr import KindError
+    meta = pd.DataFrame({"name": ["X"], "delisted": [False]},
+                        index=pd.Index(["000010"], name="symbol"))
+    monkeypatch.setattr(pipeline, "make_client_from_env", lambda path: object())
+    monkeypatch.setattr(pipeline, "collect_meta", lambda client, market: meta)
+
+    def down(since, until=None):
+        raise KindError("parsed 0 rows")
+    monkeypatch.setattr(pipeline, "kind_delisted", down)
+    r = CliRunner().invoke(app, ["collect", "--market", "kr", "--since", "2016-01-01"])
+    assert r.exit_code != 0 and "KIND" in r.output
+
+
 def test_collect_isolates_failing_symbols(cli_env, monkeypatch):
     import httpx
     from autotrade.toss.client import TossApiError

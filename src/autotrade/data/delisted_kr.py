@@ -1,5 +1,10 @@
 """Supplement delisted KR stocks' daily bars from pykrx (adjusted prices).
 
+Which stocks were delisted: Toss /stocks/all returns no DELISTED KR symbols, and pykrx's
+market-wide ticker lists no longer work (KRX site change), so the list comes from KIND's
+delisting table (kind.krx.co.kr, KOSPI + KOSDAQ, KONEX left out). KIND gives a 5-character
+company code; the common share's ticker is that code + "0".
+
 Adjusted-price mixing: pykrx rows are split/dividend-adjusted. A symbol is saved with
 source="pykrx" only as a whole file; we never splice pykrx rows into a symbol that already
 has data from another source.
@@ -9,12 +14,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+import httpx
 import pandas as pd
 
 from autotrade.data.quality import clean_daily, hard_issues
@@ -23,6 +30,61 @@ from autotrade.data.store import data_root, load_daily, load_meta, save_daily
 PYKRX_COLUMNS = {"시가": "open", "고가": "high", "저가": "low", "종가": "close", "거래량": "volume"}
 CALL_INTERVAL_S = 0.5
 log = logging.getLogger(__name__)
+
+
+KIND_URL = "https://kind.krx.co.kr/investwarn/delcompany.do"
+KIND_BOARDS = {"유가증권": "KOSPI", "코스닥": "KOSDAQ"}
+_KIND_ROW = re.compile(
+    r"alt='(유가증권|코스닥|코넥스)'.*?companysummary_open\('(\w+)'\).*?title='([^']*)'"
+    r".*?<td class=\"txc\">(\d{4}-\d{2}-\d{2})</td>", re.S)
+_KIND_TOTAL = re.compile(r'<td class="first txc" scope="row">(\d+)</td>')
+KIND_META_COLUMNS = ["name", "security_type", "product", "is_common_share", "delisted",
+                     "source", "market_board", "isin"]
+
+
+class KindError(Exception):
+    """KIND's delisting table could not be fetched or parsed completely."""
+
+
+def _kind_html(since: date, until: date) -> str:
+    form = {"method": "searchDelCompanySub", "currentPageSize": "5000", "pageIndex": "1",
+            "orderMode": "2", "orderStat": "D", "marketType": "", "searchCorpName": "",
+            "fromDate": since.isoformat(), "toDate": until.isoformat()}
+    r = httpx.post(KIND_URL, data=form, timeout=60.0, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    return r.text
+
+
+def parse_kind(html: str) -> pd.DataFrame:
+    """KOSPI/KOSDAQ rows of a KIND delisting page, indexed by ticker (code + "0"), with
+    name, market_board and delisted_on. Raises KindError when the row count differs from the
+    page's own numbering (a truncated or changed page)."""
+    rows = _KIND_ROW.findall(html)
+    numbers = [int(n) for n in _KIND_TOTAL.findall(html)]
+    if not numbers or len(rows) != max(numbers):
+        raise KindError(f"KIND page parsed {len(rows)} rows, numbered up to "
+                        f"{max(numbers) if numbers else 'none'}")
+    out = [{"symbol": code + "0", "name": name.strip(), "market_board": KIND_BOARDS[board],
+            "delisted_on": day} for board, code, name, day in rows if board in KIND_BOARDS]
+    df = pd.DataFrame(out, columns=["symbol", "name", "market_board", "delisted_on"])
+    return df.drop_duplicates("symbol", keep="first").set_index("symbol")
+
+
+def kind_delisted(since: date, until: date | None = None) -> pd.DataFrame:
+    return parse_kind(_kind_html(since, until or date.today()))
+
+
+def add_delisted_meta(meta: pd.DataFrame, kind: pd.DataFrame) -> pd.DataFrame:
+    """`meta` plus the KIND-delisted common shares it does not already list (delisted=True,
+    product stock, source 'kind')."""
+    new = kind.loc[~kind.index.isin(meta.index)]
+    if new.empty:
+        return meta
+    rows = pd.DataFrame({"name": new["name"], "security_type": "STOCK", "product": "stock",
+                         "is_common_share": True, "delisted": True, "source": "kind",
+                         "market_board": new["market_board"], "isin": None},
+                        index=new.index)[KIND_META_COLUMNS]
+    return pd.concat([meta, rows]).sort_index()
 
 
 @dataclass

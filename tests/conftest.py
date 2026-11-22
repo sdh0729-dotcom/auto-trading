@@ -19,3 +19,19 @@ def no_real_pykrx(monkeypatch):
         raise AssertionError("a test called the real pykrx")
     monkeypatch.setattr(delisted_kr, "_pykrx_ohlcv", blocked)
     monkeypatch.setattr(krx_overlay, "_pykrx_ohlcv", blocked)
+
+
+@pytest.fixture(autouse=True)
+def no_real_kind(monkeypatch):
+    """No test reaches KIND; `lab collect` tests see an empty delisting list unless they
+    patch pipeline.kind_delisted themselves."""
+    import pandas as pd
+    from autotrade import pipeline
+    from autotrade.data import delisted_kr
+
+    def blocked(*a, **k):
+        raise AssertionError("a test called the real KIND site")
+    monkeypatch.setattr(delisted_kr, "_kind_html", blocked)
+    empty = pd.DataFrame(columns=["name", "market_board", "delisted_on"],
+                         index=pd.Index([], name="symbol"))
+    monkeypatch.setattr(pipeline, "kind_delisted", lambda since, until=None: empty)

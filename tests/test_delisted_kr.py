@@ -129,3 +129,46 @@ def test_failure_is_logged_with_type_and_message(monkeypatch, tmp_data, caplog):
     assert rep.failed == ["444444"]
     assert "444444" in caplog.text and "ConnectionError" in caplog.text
     assert "KRX server closed the connection" in caplog.text
+
+
+def kind_row(n, board, code, name, day):
+    return (f'<tr class=""><td class="first txc" scope="row">{n}</td>'
+            f"<td><img src='/i.gif' class='vmiddle legend' alt='{board}'> <a id=\"companysum\" "
+            f"href=\"#companysum\" onclick=\"companysummary_open('{code}'); return false;\" "
+            f"title='{name}'> {name}</a> <img src='/p.gif' class='vmiddle legend' "
+            f"alt='상장폐지'> </td>\n<td class=\"txc\">{day}</td>\n<td>사유</td><td></td></tr>")
+
+
+KIND_PAGE = "<table><tbody>" + "".join([
+    kind_row(4, "유가증권", "41731", "코람코더원리츠", "2026-11-20"),
+    kind_row(3, "코넥스", "12345", "코넥스회사", "2026-10-01"),
+    kind_row(2, "코스닥", "0000D", "신규코드", "2025-05-16"),
+    kind_row(1, "코스닥", "05381", "아이팩토리", "2016-09-19")]) + "</tbody></table>"
+
+
+def test_parse_kind_maps_codes_to_tickers_and_drops_konex():
+    df = delisted_kr.parse_kind(KIND_PAGE)
+    assert list(df.index) == ["417310", "0000D0", "053810"]
+    assert df.loc["417310", "market_board"] == "KOSPI"
+    assert df.loc["053810", "name"] == "아이팩토리"
+    assert df.loc["0000D0", "delisted_on"] == "2025-05-16"
+
+
+def test_parse_kind_refuses_a_truncated_page():
+    cut = KIND_PAGE.replace(kind_row(2, "코스닥", "0000D", "신규코드", "2025-05-16"), "")
+    with pytest.raises(delisted_kr.KindError):
+        delisted_kr.parse_kind(cut)
+    with pytest.raises(delisted_kr.KindError):
+        delisted_kr.parse_kind("<html>maintenance</html>")
+
+
+def test_add_delisted_meta_appends_only_unknown_symbols():
+    meta = pd.DataFrame({"name": ["Live"], "security_type": ["STOCK"], "product": ["stock"],
+                         "is_common_share": [True], "delisted": [False], "source": ["toss"],
+                         "market_board": ["KOSPI"], "isin": ["KR1"]},
+                        index=pd.Index(["417310"], name="symbol"))
+    out = delisted_kr.add_delisted_meta(meta, delisted_kr.parse_kind(KIND_PAGE))
+    assert out.loc["417310", "source"] == "toss" and not out.loc["417310", "delisted"]
+    assert bool(out.loc["053810", "delisted"]) and out.loc["053810", "product"] == "stock"
+    assert out.loc["053810", "source"] == "kind" and bool(out.loc["053810", "is_common_share"])
+    assert list(out.columns) == list(meta.columns)

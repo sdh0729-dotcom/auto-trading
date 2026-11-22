@@ -337,6 +337,33 @@ def test_collect_wiring_limit_and_quality_summary(cli_env, monkeypatch):
     assert "clean 1" in r.output and "issues 1" in r.output and "missing 1" in r.output
 
 
+def test_collect_kr_refreshes_krx_overlay_for_stored_toss_symbols(cli_env, monkeypatch):
+    from autotrade.data.krx_overlay import OverlayReport, load_overlay_record
+    meta = pd.DataFrame({"name": ["X", "Y", "D"], "delisted": [False, False, True]},
+                        index=pd.Index(["000010", "000020", "000040"], name="symbol"))
+    monkeypatch.setattr(pipeline, "make_client_from_env", lambda path: object())
+    monkeypatch.setattr(pipeline, "collect_meta", lambda client, market: meta)
+
+    def fake_daily(client, market, symbol, start):
+        if symbol == "000010":
+            df = pd.DataFrame({"open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0,
+                               "volume": 1.0}, index=pd.to_datetime(["2016-01-04"]))
+            store.save_daily(market, symbol, df)
+        return 1
+    seen = {}
+
+    def fake_overlays(symbols, today):
+        seen["symbols"] = symbols
+        return OverlayReport(applied=1, mismatch=[], empty=[], failed=[])
+    monkeypatch.setattr(pipeline, "collect_daily", fake_daily)
+    monkeypatch.setattr(pipeline, "supplement_delisted_kr", lambda start, symbols=None: None)
+    monkeypatch.setattr(pipeline, "refresh_overlays", fake_overlays)
+    r = run(["collect", "--market", "kr", "--since", "2016-01-01"])
+    assert seen["symbols"] == ["000010"]          # Toss-stored only; not delisted/pykrx
+    assert "krx overlay applied 1, mismatch 0, empty 0, failed 0" in r.output
+    assert load_overlay_record()["requested"] == 1
+
+
 def test_collect_isolates_failing_symbols(cli_env, monkeypatch):
     import httpx
     from autotrade.toss.client import TossApiError

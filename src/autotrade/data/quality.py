@@ -10,10 +10,12 @@ PRICE = ["open", "high", "low", "close"]
 
 
 def clean_daily(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop suspension rows (volume 0 and any OHLC <= 0: O/H/L=0 with the previous close, as
-    Toss and pykrx return them for non-trading days). Shared by every daily source."""
-    suspended = (df["volume"] == 0) & (df[PRICE] <= 0).any(axis=1)
-    return df[~suspended]
+    """Drop every row with volume 0: no trade happened that day, so nothing could have been
+    filled. This covers suspensions as pykrx returns them (O/H/L=0 with the previous close)
+    and as Toss returns them (all prices frozen at the previous close); left in, a frozen
+    row would let a backtest buy or sell at a pre-suspension price. Dropped rows become NaN
+    in the panel, where positions are held through. Shared by every daily source."""
+    return df[df["volume"] != 0]
 
 
 def check_daily(df: pd.DataFrame) -> list[str]:

@@ -89,6 +89,9 @@ def collect(market: str = typer.Option(..., help="kr | us"),
     if dropped:
         shown = ", ".join(dropped[:10]) + (", ..." if len(dropped) > 10 else "")
         line += f" | calendar dropped {len(dropped)} ({shown})"
+    if "krx_applied" in s:
+        line += (f" | krx overlay applied {s['krx_applied']}, mismatch {s['krx_mismatch']}, "
+                 f"empty {s['krx_empty']}, failed {s['krx_failed']}")
     if "delisted_fetched" in s:
         line += (f" | delisted fetched {s['delisted_fetched']}, empty {s['delisted_empty']}, "
                  f"failed {s['delisted_failed']}, skipped {s['delisted_skipped']}")

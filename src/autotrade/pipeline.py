@@ -32,11 +32,12 @@ from autotrade.config import (ConfigError, LabConfig, MarketConfig, PocketConfig
                               _synced_path, env_path, load_lab, load_market, load_market_raw,
                               load_pocket, load_synced, repo_root)
 from autotrade.costs import CostModel
-from autotrade.data.collect import collect_daily, collect_meta
+from autotrade.data.collect import collect_daily, collect_meta, market_today
 from autotrade.data.delisted_kr import save_supplement_record, supplement_delisted_kr
+from autotrade.data.krx_overlay import refresh_overlays, save_overlay_record
 from autotrade.data.quality import check_daily, hard_issues
-from autotrade.data.store import (calendar, data_root, load_daily, load_panel, stored_symbols,
-                                  trading_dates)
+from autotrade.data.store import (calendar, data_root, load_bars, load_daily, load_panel,
+                                  stored_symbols, trading_dates)
 from autotrade.report import (CONFIDENCE_FORMULAS, RuleCard, limitations, write_leaderboard,
                               write_rule_card)
 from autotrade.rules.registry import SWING_FAMILIES
@@ -439,6 +440,11 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
         raise LabError(f"collect failed: {e}") from e
     except httpx.HTTPError as e:
         raise LabError(f"collect failed: network error ({type(e).__name__})") from e
+    overlay = None
+    if market == "kr":              # KRX regular-session bars in place of KRX+NXT ones
+        have = [s for s in via_toss if load_daily(market, s) is not None]
+        overlay = refresh_overlays(have, market_today(market))
+        save_overlay_record(overlay, len(have))
     supplement = None
     if via_pykrx:
         supplement = supplement_delisted_kr(start, symbols=via_pykrx)
@@ -453,7 +459,7 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
     summary = {"symbols": len(ordered), "rows_added": added, "clean": 0, "issues": 0,
                "warnings": 0, "missing": 0, "failed": failed}
     for sym in ordered:
-        df = load_daily(market, sym)
+        df = load_bars(market, sym)
         if df is None or df.empty:
             summary["missing"] += 1
         elif hard_issues(df):
@@ -464,6 +470,11 @@ def collect(market: str, since: date | None = None, limit: int | None = None) ->
             summary["clean"] += 1
     _, dropped = calendar(market)
     summary["calendar_dropped"] = [d.date().isoformat() for d in dropped]
+    if overlay is not None:
+        summary["krx_applied"] = overlay.applied
+        summary["krx_mismatch"] = len(overlay.mismatch)
+        summary["krx_empty"] = len(overlay.empty)
+        summary["krx_failed"] = len(overlay.failed)
     if supplement is not None:
         summary["delisted_fetched"] = supplement.fetched
         summary["delisted_empty"] = len(supplement.empty)

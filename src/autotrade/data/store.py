@@ -63,6 +63,17 @@ def load_daily(market: Market, symbol: str) -> pd.DataFrame | None:
     return pd.read_parquet(path)
 
 
+def load_bars(market: Market, symbol: str) -> pd.DataFrame | None:
+    """The bars research uses: the stored daily file, with (KR) the KRX regular-session
+    overlay in place of the KRX+NXT combined rows from NXT_START (see data.krx_overlay)."""
+    df = load_daily(market, symbol)
+    if df is None or market != "kr":
+        return df
+    from autotrade.data.krx_overlay import apply_overlay, load_overlay
+
+    return apply_overlay(df, load_overlay(symbol))
+
+
 def save_meta(market: Market, df: pd.DataFrame) -> None:
     write_parquet_atomic(df, _meta_path(market))
 
@@ -123,7 +134,7 @@ def load_panel(market: Market, symbols: list[str] | None, start: date, end: date
     s, e = pd.Timestamp(start), pd.Timestamp(end)
     frames: dict[str, pd.DataFrame] = {}
     for sym in syms:
-        df = load_daily(market, sym)
+        df = load_bars(market, sym)
         if df is None:
             continue
         frames[sym] = df.loc[(df.index >= s) & (df.index <= e)]

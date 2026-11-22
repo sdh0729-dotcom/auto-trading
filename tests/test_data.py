@@ -209,13 +209,28 @@ def test_quality_flags():
     assert check_daily(good_df()) == []
 
 
-def test_clean_daily_drops_suspension_rows_only():
+def test_clean_daily_drops_every_zero_volume_row():
     d = good_df(5)
-    d.loc[d.index[1], ["open", "high", "low", "volume"]] = 0.0      # suspension: O/H/L 0, vol 0
-    d.loc[d.index[3], "volume"] = 0.0                               # no trades, real prices
+    d.loc[d.index[1], ["open", "high", "low", "volume"]] = 0.0      # pykrx suspension: O/H/L 0
+    d.loc[d.index[3], "volume"] = 0.0          # Toss suspension: prices frozen, no trades
     out = clean_daily(d)
-    assert list(out.index) == [d.index[i] for i in (0, 2, 3, 4)]
+    assert list(out.index) == [d.index[i] for i in (0, 2, 4)]
     assert hard_issues(out) == []
+
+
+def test_toss_frozen_price_suspension_rows_are_not_stored(tmp_data):
+    c = FakeClient(first="2026-03-23", last="2026-03-27")
+    real_bar = c._bar
+
+    def bar(d, i):
+        b = real_bar(d, i)
+        if d == "2026-03-25":
+            b.update(volume=0.0)               # prices stay those of a normal bar
+        return b
+    c._bar = bar
+    collect_daily(c, "kr", "X", start=date(2026, 1, 1))
+    df = load_daily("kr", "X")
+    assert pd.Timestamp("2026-03-25") not in df.index and len(df) == 4
 
 
 def test_nan_cells_are_a_hard_issue():

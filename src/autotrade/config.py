@@ -89,6 +89,9 @@ class MarketConfig:
     commission_rate: float | None = None
     fractional_orders: bool = False
     benchmark: str | None = None      # buy-and-hold symbol validate must beat
+    # exclude ETFs whose leverage factor is unknown (US: names are bare tickers, so the
+    # name keywords cannot catch leveraged/inverse ETFs without it)
+    etf_leverage_required: bool = False
 
 
 @dataclass(frozen=True)

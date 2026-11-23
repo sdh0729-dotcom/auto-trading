@@ -209,3 +209,34 @@ def test_not_yet_listed_is_false_and_nan_does_not_crash_rank():
     m = eligible_mask(p, KR, SWING, LAB, "paper", 1400)
     assert not m["B"].iloc[:26].any()
     assert m["B"].iloc[-1]
+
+
+def test_etf_with_a_leverage_factor_other_than_one_is_excluded():
+    p = make_panel(40, ["X1", "X3", "XM1"], seed=6, products={s: "etf" for s in ["X1", "X3", "XM1"]},
+                   leverage_factor={"X1": 1.0, "X3": 3.0, "XM1": -1.0})
+    for mc, price in ((KR, 10_000.0), (US, 50.0)):     # each market's price filters pass
+        for s in p.close.columns:
+            _flat(p, s, price, 2e6)
+        m = eligible_mask(p, mc, SWING, LAB, "paper", 1400)
+        assert m.iloc[-1].to_dict() == {"X1": True, "X3": False, "XM1": False}
+
+
+def test_us_etf_with_unknown_leverage_is_excluded_kr_keeps_names_as_the_guard():
+    p = make_panel(40, ["E", "S"], seed=6, products={"E": "etf"},
+                   leverage_factor={"E": float("nan")})
+    for s in p.close.columns:
+        _flat(p, s, 50.0, 2e6)
+    assert eligible_mask(p, US, SWING, LAB, "paper", 1400).iloc[-1].to_dict() == \
+        {"E": False, "S": True}
+    _flat(p, "E", 10_000.0, 2e6)
+    _flat(p, "S", 10_000.0, 2e6)
+    assert eligible_mask(p, KR, SWING, LAB, "paper", 1400).iloc[-1]["E"]
+
+
+def test_us_keywords_also_match_the_english_name():
+    p = make_panel(40, ["SH", "OK"], seed=6, name={"SH": "SH", "OK": "OK"},
+                   english_name={"SH": "ProShares Short S&P500", "OK": "Vanguard S&P 500"})
+    _flat(p, "SH", 50.0, 2e6)
+    _flat(p, "OK", 50.0, 2e6)
+    m = eligible_mask(p, US, SWING, LAB, "paper", 1400)
+    assert not m["SH"].iloc[-1] and m["OK"].iloc[-1]

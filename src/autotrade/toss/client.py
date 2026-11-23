@@ -18,6 +18,7 @@ __all__ = ["BASE", "TossApiError", "TossClient", "CandlePage", "make_client_from
 
 # Per-second limits (Rate Limits Group per endpoint, from docs/toss/openapi.json).
 # MARKET_INFO 3/s per Toss overview Rate Limits table.
+STOCKS_PER_CALL = 200
 RATES = {"MARKET_DATA_CHART": 20, "MARKET_DATA": 15, "STOCK_ALL": 1, "STOCK": 5,
          "ORDER_INFO": 6, "MARKET_INFO": 3, "AUTH": 5}
 MAX_ATTEMPTS = 5
@@ -110,6 +111,14 @@ class TossClient:
             [{"symbol": s["symbol"], "name": s["name"], "security_type": s["securityType"],
               "is_common_share": s["isCommonShare"], "isin": s.get("isinCode")} for s in res],
             columns=["symbol", "name", "security_type", "is_common_share", "isin"])
+
+    def get_stocks(self, symbols: list[str]) -> list[dict]:
+        """Stock info (/api/v1/stocks) for `symbols`, 200 per call (the API maximum)."""
+        out: list[dict] = []
+        for i in range(0, len(symbols), STOCKS_PER_CALL):
+            batch = symbols[i:i + STOCKS_PER_CALL]
+            out.extend(self._get("/api/v1/stocks", "STOCK", {"symbols": ",".join(batch)}) or [])
+        return out
 
     def get_commissions(self) -> list[dict]:
         if self._account_seq is None:

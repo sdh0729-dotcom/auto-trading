@@ -13,3 +13,5 @@ delisted_supplement: false
 fractional_orders: true
 # validate recommends a rule only if its valid-period return beats buying and holding this
 benchmark: SPY    # S&P 500
+# ETFs need a known leverage factor (= 1) from /api/v1/stocks; US names are bare tickers
+etf_leverage_required: true

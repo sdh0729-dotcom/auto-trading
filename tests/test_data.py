@@ -52,6 +52,11 @@ class FakeClient:
         nb = page[0]["timestamp"].to_pydatetime() if more else None  # inclusive boundary
         return CandlePage(df, nb)
 
+    def get_stocks(self, symbols):
+        lev = {"069500": "1", "A069500": "2"}
+        return [{"symbol": s, "englishName": f"EN {s}", "leverageFactor": lev.get(s)}
+                for s in symbols if s in lev]
+
     def list_stocks(self, market, status="ACTIVE", security_type=None):
         rows = [
             ("005930", "삼성전자", "STOCK", True), ("005935", "삼성전자우", "STOCK", False),
@@ -457,3 +462,11 @@ def test_load_panel_carries_the_market_calendar_through_slices(tmp_path, monkeyp
     assert p.close.index[-1] == pd.Timestamp("2024-01-10")
     assert p.calendar.equals(trading_dates("kr", date(2000, 1, 1), date(2100, 1, 1)))
     assert p.slice(date(2024, 1, 2), date(2024, 1, 5)).calendar.equals(p.calendar)
+
+
+def test_meta_records_etf_leverage_factor_and_english_name(fake_client, tmp_data):
+    meta = collect_meta(fake_client, "kr")
+    assert meta.loc["069500", "leverage_factor"] == 1.0
+    assert meta.loc["A069500", "leverage_factor"] == 2.0
+    assert meta.loc["069500", "english_name"] == "EN 069500"
+    assert np.isnan(meta.loc["005930", "leverage_factor"])     # stocks are not looked up

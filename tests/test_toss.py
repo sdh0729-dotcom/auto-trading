@@ -23,7 +23,8 @@ def client(tmp_path, respx_mock):
     http = httpx.Client()
     auth = TossAuth("id", "sec", tmp_path / "t.json", http)
     fast = RateLimiter({g: 1e6 for g in
-                        ["MARKET_DATA_CHART", "STOCK_ALL", "ORDER_INFO", "MARKET_INFO", "AUTH"]})
+                        ["MARKET_DATA_CHART", "STOCK_ALL", "STOCK", "ORDER_INFO", "MARKET_INFO",
+                         "AUTH"]})
     return TossClient(auth, http, fast, account_seq=7)
 
 
@@ -279,3 +280,15 @@ def test_401_keeps_a_newer_token_from_another_process(tmp_path, respx_mock):
     assert json.loads(path.read_text())["access_token"] == "newer"
     auth.invalidate("newer")
     assert not path.exists()
+
+
+def test_get_stocks_batches_200_symbols_per_call(respx_mock, client):
+    def reply(request):
+        syms = parse_qs(urlparse(str(request.url)).query)["symbols"][0].split(",")
+        return httpx.Response(200, json={"result": [
+            {"symbol": s, "englishName": f"E {s}", "leverageFactor": "-3" if s == "S7" else "1"}
+            for s in syms]})
+    route = respx_mock.get(f"{BASE}/api/v1/stocks").mock(side_effect=reply)
+    rows = client.get_stocks([f"S{i}" for i in range(450)])
+    assert route.call_count == 3
+    assert len(rows) == 450 and rows[7]["leverageFactor"] == "-3"

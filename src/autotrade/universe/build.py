@@ -79,8 +79,18 @@ def eligible_mask(panel: Panel, market: MarketConfig, pocket: PocketConfig,
     allowed = meta["product"].isin(_ALLOWED_PRODUCTS)
     excluded = ~common | ~allowed
     if market.exclude_name_keywords:
-        excluded |= meta["name"].fillna("").astype(str).str.contains(
-            _keyword_pattern(market), case=False, regex=True)
+        pat = _keyword_pattern(market)
+        for col in ("name", "english_name"):
+            if col in meta.columns:
+                excluded |= meta[col].fillna("").astype(str).str.contains(
+                    pat, case=False, regex=True)
+    # leveraged / inverse ETFs by the Toss leverage factor (1.0 = plain)
+    is_etf = meta["product"].eq("etf")
+    lev = pd.to_numeric(meta["leverage_factor"], errors="coerce") \
+        if "leverage_factor" in meta.columns else pd.Series(np.nan, index=meta.index)
+    excluded |= is_etf & lev.notna() & (lev != 1.0)
+    if market.etf_leverage_required:
+        excluded |= is_etf & lev.isna()
     ok_symbol = pd.Series(~excluded.to_numpy(), index=cols)
 
     # --- rank by trailing trading value, shifted one day ---

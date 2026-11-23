@@ -211,5 +211,32 @@ def collect_meta(client: TossClient, market: Market) -> pd.DataFrame:
     cols = ["name", "security_type", "product", "is_common_share", "delisted", "source",
             "market_board", "isin"]
     allm = allm[cols]
+    allm = add_etf_info(client, allm)
     save_meta(market, allm)
     return allm
+
+
+def add_etf_info(client: TossClient, meta: pd.DataFrame) -> pd.DataFrame:
+    """leverage_factor (float; 1.0 plain, 2/3 leveraged, negative inverse; NaN unknown) and
+    english_name for every ETF, from /api/v1/stocks. The universe excludes ETFs whose
+    factor is not 1 (US names from /stocks/all are bare tickers, so name keywords miss
+    TQQQ/SPXU). Stocks are not looked up."""
+    out = meta.copy()
+    out["leverage_factor"] = np.nan
+    out["english_name"] = pd.Series(pd.NA, index=out.index, dtype="string")
+    etfs = [str(s) for s in out.index[out["product"] == "etf"]]
+    for row in client.get_stocks(etfs) if etfs else []:
+        sym = str(row.get("symbol"))
+        if sym not in out.index:
+            continue
+        lf = row.get("leverageFactor")
+        try:
+            out.loc[sym, "leverage_factor"] = float(lf) if lf is not None else np.nan
+        except (TypeError, ValueError):
+            pass
+        out.loc[sym, "english_name"] = row.get("englishName")
+    out["english_name"] = out["english_name"].astype("string")
+    unknown = int(out.loc[out["product"] == "etf", "leverage_factor"].isna().sum())
+    if unknown:
+        log.warning("%d ETFs without a leverage factor from /api/v1/stocks", unknown)
+    return out

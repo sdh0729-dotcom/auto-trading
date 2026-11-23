@@ -34,6 +34,8 @@ def make_panel(n_days: int, symbols: list[str], seed: int,
         "is_common_share": {s: True for s in symbols},
         "delisted": {s: False for s in symbols},
         "source": {s: "synthetic" for s in symbols},
+        "leverage_factor": {s: 1.0 if prod[s] == "etf" else np.nan for s in symbols},
+        "english_name": {s: None for s in symbols},
     }, index=pd.Index(symbols, name="symbol"))
     for col, mapping in overrides.items():
         if col not in META_COLUMNS:

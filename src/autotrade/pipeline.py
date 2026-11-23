@@ -1017,7 +1017,7 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
         periods={k: list(_iso(getattr(s.periods, k))) for k in ("train", "valid", "sealed")},
         metrics_by_stage={"screen": scr.iloc[-1]["metrics"], "validate": vrow["metrics"]},
         scenarios=scenarios, verdict=verdict, parity=parity,
-        limitations=limitations(s.market, family=family),
+        limitations=limitations(s.market, family=family, pocket=pocket),
         validate_runs=s.record.validate_runs, currency=s.market.currency, cycle=cycle)
     md, js = write_rule_card(card, cards_dir())
     return card, md, js
@@ -1059,7 +1059,7 @@ def report(pocket: str, market: str) -> Path:
     _check_market(market)
     out = leaderboard_path(pocket, market)
     return write_leaderboard(ExperimentLog(experiments_path()), pocket, market, out,
-                             limitations=limitations(load_market_raw(market)),
+                             limitations=limitations(load_market_raw(market), pocket=pocket),
                              cards_rel=Path(os.path.relpath(cards_dir(), out.parent)).as_posix())
 
 

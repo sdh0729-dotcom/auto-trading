@@ -145,3 +145,16 @@ def test_limitations_show_the_actual_supplement_results(tmp_path, monkeypatch):
     assert "실패 5" in line and "건너뜀 3" in line and "대상 120" in line
     us = next(x for x in limitations(load_market_raw("us")) if "상장폐지" in x)
     assert "보충하지 않음" in us                                  # US: no supplement at all
+
+
+def test_daytrade_limitations_listed():
+    for m in ("kr", "us"):
+        lines = limitations(load_market_raw(m), pocket="daytrade")
+        text = "\n".join(lines)
+        assert "생존자" in text and "1분봉" in text
+        assert "Plan 2b" in text and "거래량 0" in text
+    kr = "\n".join(limitations(load_market_raw("kr"), pocket="daytrade"))
+    assert "KRX+NXT" in kr and "6%" in kr and "ETF" in kr and "10%" in kr
+    assert "NBBO" in "\n".join(limitations(load_market_raw("us"), pocket="daytrade"))
+    swing = limitations(load_market_raw("kr"))
+    assert not any("1분봉" in x for x in swing)

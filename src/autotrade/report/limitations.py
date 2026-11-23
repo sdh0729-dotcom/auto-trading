@@ -33,12 +33,34 @@ def _overlay_line() -> str:
             "대체하지 못한 종목은 토스 KRX+NXT 통합 시세(NXT 시간대 체결 포함)로 남아 있다.")
 
 
-def limitations(market: MarketConfig, family: str | None = None) -> list[str]:
+def _daytrade_lines(market: str) -> list[str]:
+    out = ["상장폐지 종목: 토스 1분봉에 상장폐지 종목 데이터가 없다 — 단타 유니버스는 생존자만이다"
+           "(생존 편향)."]
+    if market == "kr":
+        out += [
+            "국내 1분봉은 토스 KRX+NXT 통합 시세다(정규장 09:00-15:30만 사용, 그 안의 NXT 체결 포함).",
+            "코스피200 편입 여부를 모른다 → 모든 국내 종목에 동적 VI 6%를 적용하고, ETF는 VI 면제로 "
+            "본다. 시가 갭 10% 이상은 시가 정적 VI로 처리한다.",
+        ]
+    else:
+        out.append("미국 1분봉은 NBBO가 아니다(토스의 일부 거래소 시세). 프리·애프터마켓 봉은 버린다.")
+    out += [
+        "토스는 거래량 0의 평평한 봉을 내보낸다(예: 국내 15:21-15:29 종가 단일가 구간). 체결이 "
+        "그런 봉에서 마지막 체결가로 일어날 수 있다.",
+        "단타 verify --final(분봉 Nautilus)은 아직 없다(Plan 2b) — 단타 포켓에는 봉인 결과가 없다.",
+    ]
+    return out
+
+
+def limitations(market: MarketConfig, family: str | None = None,
+                pocket: str = "swing") -> list[str]:
     """Delisted-data coverage (per market: the recorded supplement results where the
     market supplements), not NBBO, no suspension/warning history, KR daily bars from NXT
     start (the recorded KRX overlay coverage), US fractional-order limits not modelled, and
     the overnight family's 1-night hold exception."""
     out = []
+    if pocket == "daytrade":
+        return _daytrade_lines(market.market)
     if market.delisted_supplement:
         out.append(_supplement_line(market.market))
     else:

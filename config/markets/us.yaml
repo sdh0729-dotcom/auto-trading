@@ -18,3 +18,5 @@ etf_leverage_required: true
 session_open: "09:30"
 session_close: "16:00"
 minute_start: 2021-12-01
+# ORB stocks-in-play ATR floor (paper: ATR > $0.50)
+orb_min_atr: 0.50

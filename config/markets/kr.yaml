@@ -19,3 +19,5 @@ fractional_orders: false
 benchmark: "069500"    # KODEX 200
 minute_start: 2022-11-23
 vi: {static_pct: 0.10, dynamic_pct_kospi200: 0.03, dynamic_pct_other: 0.06, halt_minutes: 2, etf_exempt: true}
+# LAB ASSUMPTION, not from the paper: KR counterpart of the US $0.50 ATR floor (ATR14 > 1% of prior close)
+orb_min_atr_pct: 0.01

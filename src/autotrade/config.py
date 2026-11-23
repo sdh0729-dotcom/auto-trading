@@ -93,6 +93,10 @@ class MarketConfig:
     # name keywords cannot catch leveraged/inverse ETFs without it)
     etf_leverage_required: bool = False
     minute_start: date | None = None  # first day of stored 1-minute history
+    # ORB stocks-in-play ATR14 floor of the prior days: absolute price (US) or fraction of the
+    # prior close (KR); None = no floor
+    orb_min_atr: float | None = None
+    orb_min_atr_pct: float | None = None
     vi: VIConfig | None = None        # KR volatility-interruption auctions
 
 

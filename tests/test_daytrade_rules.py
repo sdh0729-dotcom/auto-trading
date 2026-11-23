@@ -131,3 +131,23 @@ def test_families_registered_with_documented_grids():
     assert DAYTRADE_FAMILIES["orb_sip"] is OrbStocksInPlay and DAYTRADE_FAMILIES["orb"] is Orb
     assert len(Orb.grid()) == 18 and len(OrbStocksInPlay.grid()) == 4
     assert len({Orb(p).rule_id for p in Orb.grid()}) == 18
+
+
+def test_atr_floors_come_from_market_config():
+    from autotrade.config import load_market_raw
+    assert load_market_raw("us").orb_min_atr == 0.50 and load_market_raw("us").orb_min_atr_pct is None
+    assert load_market_raw("kr").orb_min_atr_pct == 0.01 and load_market_raw("kr").orb_min_atr is None
+
+
+def test_orb_sip_select_applies_the_us_atr_floor_and_trusts_eligible():
+    panel, stacked, elig, syms = _sip_env()
+    panel = make_panel(120, syms, seed=2, start="2023-11-01")
+    for s in syms:
+        panel.close[s], panel.open[s] = 50.0, 50.0
+        panel.high[s], panel.low[s], panel.volume[s] = 52.0, 48.0, 2_000_000.0
+    panel.high["S24"], panel.low["S24"] = 50.1, 49.9          # ATR 0.2 < $0.50
+    elig = pd.DataFrame(True, index=panel.close.index, columns=syms)
+    elig["S23"] = False                                       # universe says no
+    sel = OrbStocksInPlay({"stop_atr": 0.5, "or_minutes": 5}).select(stacked, panel, elig)
+    last = {s for d, s in sel if d == DAYS[-1]}
+    assert "S24" not in last and "S23" not in last and "S22" in last

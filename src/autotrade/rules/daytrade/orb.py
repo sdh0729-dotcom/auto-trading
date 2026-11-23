@@ -19,15 +19,12 @@ import numpy as np
 import pandas as pd
 
 from autotrade.config import load_market_raw
-from autotrade.costs.model import tick_size
 from autotrade.rules.daytrade.base import DAY_SYMBOL, IntradayRule, candidate_frame, empty_candidates
 from autotrade.rules.indicators import atr
 from autotrade.types import TZ, Panel
 
 TOP_N = 20
 MIN_REL_VOLUME = 1.0
-US_MIN_ATR = 0.50
-KR_MIN_ATR_PCT = 0.01
 RV_WINDOW = 14
 FIRST_MINUTES = 5
 _MAX_STOP_PCT = 0.99
@@ -78,7 +75,12 @@ def _prior_atr(daily: Panel, symbol: str) -> pd.Series:
 
 
 class OrbStocksInPlay(IntradayRule):
-    """Stocks-in-play ORB: top-20 relative first-5-minute volume, long only on up opens."""
+    """Stocks-in-play ORB: top-20 relative first-5-minute volume, long only on up opens.
+
+    `select` TRUSTS `eligible` (the point-in-time universe mask from universe.build) for the
+    price, 14-day average volume and KR tick-cost filters; it adds only the ATR floor
+    (MarketConfig.orb_min_atr / orb_min_atr_pct), rel volume >= 1.0 and the top-20 ranking.
+    """
     family = "orb_sip"
     PARAM_KEYS = ("stop_atr", "or_minutes")
 
@@ -121,24 +123,18 @@ class OrbStocksInPlay(IntradayRule):
         if f.empty:
             return empty
         prev_close = daily.close.shift(1)
-        avg_vol = daily.volume.rolling(RV_WINDOW).mean().shift(1)
         atr14 = atr(daily, RV_WINDOW).shift(1)
         keep = []
         for (d, s), _ in f.iterrows():
             if d not in prev_close.index or s not in prev_close.columns:
                 keep.append(False)
                 continue
-            px, vol, a = prev_close.at[d, s], avg_vol.at[d, s], atr14.at[d, s]
+            px, a = prev_close.at[d, s], atr14.at[d, s]
             ok = bool(np.isfinite(px) and np.isfinite(a))
-            if ok and market.min_price is not None:
-                ok = px > market.min_price
-            if ok and market.min_avg_volume_14d is not None:
-                ok = bool(np.isfinite(vol) and vol >= market.min_avg_volume_14d)
-            if ok and market.max_tick_cost_pct is not None:     # KR tick-cost filter
-                product = daily.meta["product"].get(s, "stock")
-                ok = tick_size(float(px), market, product) / px <= market.max_tick_cost_pct
-            if ok:
-                ok = a > (KR_MIN_ATR_PCT * px if market.market == "kr" else US_MIN_ATR)
+            if ok and market.orb_min_atr is not None:
+                ok = a > market.orb_min_atr
+            if ok and market.orb_min_atr_pct is not None:
+                ok = a > market.orb_min_atr_pct * px
             keep.append(ok)
         f = f[np.array(keep, dtype=bool)]
         top = f.groupby(level="day")["rel_vol"].rank(method="first", ascending=False) <= TOP_N

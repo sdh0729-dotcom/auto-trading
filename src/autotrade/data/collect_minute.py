@@ -26,6 +26,10 @@ COMPLETE_MARKER = "_complete"
 PAGE = 200
 
 
+class PriceScaleError(Exception):
+    """Prices keep changing scale between calls: refetching once did not settle them."""
+
+
 @dataclass
 class MinuteReport:
     added: int
@@ -97,13 +101,14 @@ def _forward(client, market, symbol, today_ts, hi) -> tuple[pd.DataFrame, bool]:
 
 
 def collect_minutes(client: TossClient, market: Market, symbol: str, since: date,
-                    today: pd.Timestamp) -> MinuteReport:
+                    today: pd.Timestamp, _refetched: bool = False) -> MinuteReport:
     """Collect 1-minute bars back to `since` (local date); return rows added.
 
     `today` is the market's current session date: its bars are never stored. A changed price
     scale on the overlap (split / adjustment) deletes the symbol's minute files and refetches
     them from scratch. `_complete` marks that the backward part reached `since` (or the
-    end of the history), so later runs only fetch forward."""
+    end of the history), so later runs only fetch forward. A second scale mismatch right
+    after such a refetch raises PriceScaleError instead of looping."""
     today_ts, since_ts = pd.Timestamp(today).normalize(), pd.Timestamp(since)
     d = minute_dir(market, symbol)
     added = 0
@@ -131,9 +136,11 @@ def collect_minutes(client: TossClient, market: Market, symbol: str, since: date
         if lo is not None and not _same_scale(market, symbol, bars[bars.index >= lo], lo):
             log.warning("%s %s: older minute prices do not match the stored scale; "
                         "refetching from scratch", market, symbol)
-            _wipe(market, symbol)
-            return replace(collect_minutes(client, market, symbol, since, today),
-                           added=added)
+            if _refetched:
+                raise PriceScaleError(f"{market} {symbol}: minute prices changed scale "
+                                      "again right after a refetch")
+            _wipe(market, symbol)       # nothing stored before the wipe counts as added
+            return collect_minutes(client, market, symbol, since, today, _refetched=True)
         keep = bars[(_local_dates(bars.index) < today_ts)
                     & (_local_dates(bars.index) >= since_ts)]
         if lo is not None:

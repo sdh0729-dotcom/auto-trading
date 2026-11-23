@@ -157,3 +157,41 @@ def test_pauses_while_daily_job_runs(monkeypatch):
     assert sleeps == [30, 30]
     assert seen == [("A", False), ("B", False)]
     assert out == {"symbols": 2, "added": 10, "complete": 2, "not_found": 0, "failed": 0}
+
+
+class PartialSplitClient(FakeMinuteClient):
+    """Bars before `cutoff` are rescaled by 1/2 once `split_on` (older adjusted history)."""
+
+    cutoff = pd.Timestamp("2024-01-04T00:00:00+09:00")
+    split_on = False
+
+    def series(self):
+        rows = super().series()
+        if self.split_on:
+            for r in rows:
+                if r["timestamp"] < self.cutoff:
+                    for k in ("open", "high", "low", "close"):
+                        r[k] /= 2
+        return rows
+
+
+def test_backward_mismatch_after_abort_refetches_at_new_scale():
+    c = PartialSplitClient(n_days=3, fail_after=2)
+    with pytest.raises(RuntimeError):
+        cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), TODAY)
+    partial = len(_stored(c))
+    assert 0 < partial < 3 * BARS_PER_DAY
+    c.fail_after, c.split_on = None, True
+    rep = cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), TODAY)
+    df = _stored(c)
+    assert rep.complete and list(df.index) == _full_ts(c)
+    assert rep.added == len(df) == 3 * BARS_PER_DAY      # nothing from before the wipe
+    expected = pd.DataFrame(c.series()).set_index("timestamp")["open"]
+    assert df["open"].to_numpy() == pytest.approx(expected.to_numpy())
+
+
+def test_repeated_mismatch_raises_instead_of_looping(monkeypatch):
+    monkeypatch.setattr(cm, "_same_scale", lambda *a, **k: False)
+    c = FakeMinuteClient(n_days=3)
+    with pytest.raises(cm.PriceScaleError):
+        cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), TODAY)

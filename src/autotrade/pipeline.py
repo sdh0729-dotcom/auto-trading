@@ -16,10 +16,12 @@ run_portfolio / run_nautilus are limited to the period itself.
 """
 from __future__ import annotations
 
+import fcntl
 import logging
 import math
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -34,10 +36,10 @@ from autotrade.config import (ConfigError, LabConfig, MarketConfig, PocketConfig
                               load_pocket, load_synced, repo_root)
 from autotrade.costs import CostModel
 from autotrade.data.collect import collect_daily, collect_meta, market_today
-from autotrade.data.collect_minute import collect_minutes, minute_symbols
+from autotrade.data.collect_minute import COMPLETE_MARKER, collect_minutes, minute_symbols
 from autotrade.data.delisted_kr import (KindError, add_delisted_meta, kind_delisted,
                                         save_supplement_record, supplement_delisted_kr)
-from autotrade.data.minute_store import minute_calendar, minute_dir
+from autotrade.data.minute_store import minute_bounds, minute_calendar, minute_dir
 from autotrade.data.krx_overlay import refresh_overlays, save_overlay_record
 from autotrade.data.quality import check_daily, hard_issues
 from autotrade.data.store import (calendar, data_root, load_bars, load_daily, load_panel,
@@ -52,7 +54,7 @@ from autotrade.screen.simulate import simulate
 from autotrade.sizing import PortfolioResult, run_portfolio
 from autotrade.sizing.intraday import local_day, run_intraday_portfolio
 from autotrade.toss.client import TossApiError, make_client_from_env
-from autotrade.types import TRADE_COLUMNS, Panel
+from autotrade.types import TRADE_COLUMNS, TZ, Panel
 from autotrade.universe.build import eligible_mask
 from autotrade.validate.criteria import evaluate, period_equity
 from autotrade.validate.experiments import ExperimentLog
@@ -69,6 +71,10 @@ SCENARIOS = ("paper", "real")
 VALID_SEGMENTS = 4               # "검증 기간 구간 안정성": valid cut into 4 test segments
 PBO_SPLITS = (16, 8, 4, 2)
 FEATURE_WARMUP_DAYS = 30         # calendar days of minute bars before valid for rolling features
+# the benchmark's first stored minute bar may lie up to this many calendar days after the
+# market's minute_start (Toss's history can begin a few days late) before screen / validate
+# call its minute history short
+MINUTE_START_TOLERANCE_DAYS = 10
 MAX_COMMISSION = 0.01            # a commission ratio >= 1% is almost surely a percent typo
 PARITY_MISMATCHES_KEPT = 20
 FAMILIES = {"swing": SWING_FAMILIES, "daytrade": DAYTRADE_FAMILIES}
@@ -111,6 +117,90 @@ def _refuse_limited(market: str) -> None:
     if limited_marker(market).exists():
         raise LabError(f"{market} data comes from `lab collect --limit` (partial universe): "
                        f"run a full `lab collect --market {market}` first")
+
+
+def minute_root(market: str) -> Path:
+    return data_root() / market / "1m"
+
+
+def minute_limited_marker(market: str) -> Path:
+    """Exists while the stored minute data comes from `lab collect-minute --limit`."""
+    return minute_root(market) / ".limited"
+
+
+def collect_lock_path(market: str) -> Path:
+    """flock()ed by a running `lab collect-minute` for its whole run (one writer at a time)."""
+    return minute_root(market) / ".collect.lock"
+
+
+@contextmanager
+def _collect_lock(market: str):
+    """Hold the market's collector lock (non-blocking): LabError if another run holds it.
+    The lock dies with its process, so a killed run never leaves a stale lock behind."""
+    path = collect_lock_path(market)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "a")
+    try:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise LabError(f"`lab collect-minute --market {market}` is already running "
+                           f"(lock {path}): wait for it to finish") from None
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+    finally:
+        f.close()
+
+
+def collect_running(market: str) -> bool:
+    """True while some process holds the market's collector lock."""
+    path = collect_lock_path(market)
+    if not path.exists():
+        return False
+    with open(path, "a") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(f, fcntl.LOCK_UN)
+        return False
+
+
+def _refuse_incomplete_minutes(market: str) -> None:
+    """Daytrade screen / validate run only on a finished minute collection: no collector
+    running, no `--limit` partial set, every stored symbol's history marked `_complete`, and
+    the benchmark's history (the minute calendar) reaching back to minute_start (first bar
+    within MINUTE_START_TOLERANCE_DAYS calendar days of it). Checked before anything is
+    written, since a premature screen fixes the periods file and logs trials for good."""
+    fix = f"finish `lab collect-minute --market {market}` first"
+    if collect_running(market):
+        raise LabError(f"`lab collect-minute --market {market}` is running: wait for it to "
+                       "finish (its minute data is still changing)")
+    if minute_limited_marker(market).exists():
+        raise LabError(f"{market} minute data comes from `lab collect-minute --limit` "
+                       f"(partial symbol set): run a full `lab collect-minute --market "
+                       f"{market}` first")
+    root = minute_root(market)
+    dirs = sorted(p for p in root.iterdir() if p.is_dir()) if root.exists() else []
+    partial = [p.name for p in dirs if not (p / COMPLETE_MARKER).exists()]
+    if partial:
+        raise LabError(f"{len(partial)} {market} symbol(s) have incomplete minute history (no "
+                       f"{COMPLETE_MARKER} marker: {', '.join(partial[:5])}"
+                       f"{', ...' if len(partial) > 5 else ''}): {fix}")
+    mc = load_market_raw(market)
+    if mc.benchmark is None or mc.minute_start is None:
+        raise LabError(f"{market} config needs a benchmark and a minute_start for daytrade")
+    bounds = minute_bounds(market, mc.benchmark)
+    if bounds is None:
+        raise LabError(f"benchmark {mc.benchmark} has no minute data: {fix}")
+    first = bounds[0].tz_convert(TZ[market]).tz_localize(None).normalize()
+    limit = pd.Timestamp(mc.minute_start) + pd.Timedelta(days=MINUTE_START_TOLERANCE_DAYS)
+    if first > limit:
+        raise LabError(f"benchmark {mc.benchmark} minute history starts {first.date()}, more "
+                       f"than {MINUTE_START_TOLERANCE_DAYS} days after minute_start "
+                       f"{mc.minute_start}: {fix}")
 
 
 def cards_dir() -> Path:
@@ -450,16 +540,28 @@ def _wait_for_daily_job() -> None:
 def collect_minute(market: str, limit: int | None = None) -> dict:
     """1-minute bars back to the market's minute_start for the daily universe symbols
     (top lab.universe_top_n on any day since then, plus always_include), most universe days
-    first. Resumable; `limit` keeps the first N symbols. Skips stock-not-found symbols;
-    MAX_CONSECUTIVE_FAILURES in a row (or a Toss 401/403) abort."""
+    first. Resumable; `limit` keeps the first N symbols and marks the minute data as partial
+    (`minute_limited_marker`; daytrade screen / validate refuse it) until a full run reaches
+    the end. Skips stock-not-found symbols; MAX_CONSECUTIVE_FAILURES in a row (or a Toss
+    401/403) abort. One run per market at a time: the whole run holds `collect_lock_path`
+    (flock), a second run refuses to start (two writers would merge and rewrite the same
+    month files and drop each other's bars)."""
     _check_market(market)
     mc = load_market_raw(market)
     if mc.minute_start is None:
         raise LabError(f"{market} has no minute_start in its config")
+    with _collect_lock(market):
+        return _collect_minute_locked(market, mc, limit)
+
+
+def _collect_minute_locked(market: str, mc: MarketConfig, limit: int | None) -> dict:
     today = market_today(market)
     syms = minute_symbols(market, mc.minute_start, today.date(), load_lab().universe_top_n)
+    marker = minute_limited_marker(market)
     if limit is not None:
         syms = syms[:limit]
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"lab collect-minute --limit {limit}\n", encoding="utf-8")
     client = _client()
     out = {"symbols": len(syms), "added": 0, "complete": 0, "not_found": 0, "failed": 0}
     failed: list[str] = []
@@ -489,6 +591,8 @@ def collect_minute(market: str, limit: int | None = None) -> dict:
     except httpx.HTTPError as e:
         raise LabError(f"collect-minute failed: network error ({type(e).__name__})") from e
     out["failed"] = len(failed)
+    if limit is None:               # a full run went over every symbol
+        marker.unlink(missing_ok=True)
     return out
 
 
@@ -610,6 +714,9 @@ def screen(pocket: str, market: str, family: str = "all") -> pd.DataFrame:
     for n in names:
         if n not in fams:
             raise LabError(f"unknown family {n!r} (choose from all, {', '.join(fams)})")
+    if pocket == "daytrade":
+        _check_market(market)
+        _refuse_incomplete_minutes(market)
     s = _setup(pocket, market, create=True)
     t0, t1 = s.periods.train
     _refuse_opened_overlap(pocket, market, t0, t1, "screen")
@@ -713,6 +820,9 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     trade) and valid_worst_day (min daily return)."""
     if top < 1:
         raise LabError("--top must be >= 1")
+    if pocket == "daytrade":
+        _check_market(market)
+        _refuse_incomplete_minutes(market)
     s = _setup(pocket, market)
     fams = _families(pocket)
     log = ExperimentLog(experiments_path())

@@ -7,7 +7,8 @@ import yaml
 
 from autotrade import pipeline
 from autotrade.data import store
-from autotrade.data.minute_store import load_minutes, save_minutes
+from autotrade.data.collect_minute import COMPLETE_MARKER
+from autotrade.data.minute_store import load_minutes, minute_dir, save_minutes
 from autotrade.rules.daytrade.base import IntradayRule
 from autotrade.rules.registry import DAYTRADE_FAMILIES
 from autotrade.screen import run as screen_run
@@ -39,9 +40,24 @@ class Toy(IntradayRule):
         return pd.DataFrame(rows, columns=CANDIDATE_COLUMNS)
 
 
+def _config_with_minute_start(tmp_path, monkeypatch, day) -> None:
+    """A copy of the repo config whose kr minute_start is the synthetic store's first day."""
+    import shutil
+    from autotrade.config import repo_root
+    cfg = tmp_path / "config"
+    shutil.copytree(repo_root() / "config", cfg)
+    kr = cfg / "markets" / "kr.yaml"
+    text = kr.read_text(encoding="utf-8")
+    assert "minute_start: 2022-11-23" in text
+    kr.write_text(text.replace("minute_start: 2022-11-23", f"minute_start: {day:%Y-%m-%d}"),
+                  encoding="utf-8")
+    monkeypatch.setenv("AUTOTRADE_CONFIG", str(cfg))
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTOTRADE_DATA", str(tmp_path / "data"))
+    _config_with_minute_start(tmp_path, monkeypatch, MINUTE_DAYS[0])
     monkeypatch.setenv("AUTOTRADE_RESEARCH", str(tmp_path / "research"))
     synced = tmp_path / "synced.yaml"
     monkeypatch.setenv("AUTOTRADE_SYNCED", str(synced))
@@ -73,6 +89,7 @@ def env(tmp_path, monkeypatch):
             save_minutes("kr", sym, pd.concat(frames))
         else:
             save_minutes("kr", sym, pd.concat(frames[:30]))
+        (minute_dir("kr", sym) / COMPLETE_MARKER).touch()     # a finished collection
     return tmp_path
 
 
@@ -278,3 +295,67 @@ def test_validate_runs_one_minute_pass_per_family(env, monkeypatch):
                         lambda m, sym, a, b, *x, **k: (calls.append(sym), real(m, sym, a, b, *x, **k))[1])
     pipeline.validate("daytrade", "kr", 3)
     assert max(calls.count(sym) for sym in set(calls)) == 1   # toy has no features: 1 load
+
+
+# ---------------------------------------------------------------- incomplete minute data
+def _screen_refused(match):
+    with pytest.raises(pipeline.LabError, match=match):
+        pipeline.screen("daytrade", "kr", "toy")
+    assert not pipeline.periods_path("daytrade", "kr").exists()     # nothing irreversible
+    assert not pipeline.experiments_path().exists()
+
+
+def test_screen_refuses_a_symbol_without_complete_marker(env):
+    (minute_dir("kr", "A02") / COMPLETE_MARKER).unlink()
+    _screen_refused("A02")
+
+
+def test_validate_refuses_a_symbol_without_complete_marker(env):
+    pipeline.screen("daytrade", "kr", "toy")
+    (minute_dir("kr", "A01") / COMPLETE_MARKER).unlink()
+    with pytest.raises(pipeline.LabError, match="A01"):
+        pipeline.validate("daytrade", "kr", 3)
+
+
+def test_screen_refuses_while_collect_minute_limited_marker_exists(env):
+    pipeline.minute_limited_marker("kr").write_text("lab collect-minute --limit 3\n")
+    _screen_refused("--limit")
+
+
+def test_validate_refuses_while_collect_minute_limited_marker_exists(env):
+    pipeline.screen("daytrade", "kr", "toy")
+    pipeline.minute_limited_marker("kr").write_text("lab collect-minute --limit 3\n")
+    with pytest.raises(pipeline.LabError, match="--limit"):
+        pipeline.validate("daytrade", "kr", 3)
+
+
+def test_screen_refuses_a_benchmark_history_short_of_minute_start(env, tmp_path, monkeypatch):
+    # benchmark 069500 starts on MINUTE_DAYS[0]; minute_start 11 calendar days earlier
+    _config_with_minute_start(tmp_path / "late", monkeypatch,
+                              MINUTE_DAYS[0] - pd.Timedelta(days=pipeline.MINUTE_START_TOLERANCE_DAYS + 1))
+    _screen_refused("069500")
+
+
+def test_screen_tolerates_a_few_missing_first_days(env, tmp_path, monkeypatch):
+    _config_with_minute_start(tmp_path / "ok", monkeypatch,
+                              MINUTE_DAYS[0] - pd.Timedelta(days=pipeline.MINUTE_START_TOLERANCE_DAYS))
+    pipeline.screen("daytrade", "kr", "toy")
+    assert pipeline.periods_path("daytrade", "kr").exists()
+
+
+def test_screen_refuses_a_missing_benchmark(env):
+    import shutil
+    shutil.rmtree(minute_dir("kr", "069500"))
+    with pytest.raises(pipeline.LabError, match="069500"):
+        pipeline.screen("daytrade", "kr", "toy")
+
+
+def test_screen_and_validate_refuse_while_the_collector_runs(env):
+    pipeline.screen("daytrade", "kr", "toy")
+    with pipeline._collect_lock("kr"):
+        with pytest.raises(pipeline.LabError, match="collect-minute"):
+            pipeline.screen("daytrade", "kr", "toy")
+        with pytest.raises(pipeline.LabError, match="collect-minute"):
+            pipeline.validate("daytrade", "kr", 3)
+    pipeline.validate("daytrade", "kr", 3)                 # lock released: allowed again
+

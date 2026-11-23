@@ -302,3 +302,75 @@ def test_forward_partial_write_stays_contiguous(monkeypatch):
     restore()
     rep = cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), today)
     assert rep.complete and list(_stored(c).index) == _full_ts(c)
+
+
+def _fake_run(monkeypatch, seen):
+    from autotrade import pipeline
+    monkeypatch.setattr(pipeline, "_client", lambda: object())
+    monkeypatch.setattr(pipeline, "minute_symbols", lambda *a, **k: ["A", "B", "C"])
+    monkeypatch.setattr(pipeline, "collect_minutes",
+                        lambda c, m, s, since, today: seen.append(s) or cm.MinuteReport(1, True))
+    return pipeline
+
+
+def test_second_collector_refuses_to_start(monkeypatch):
+    import fcntl
+    seen = []
+    pipeline = _fake_run(monkeypatch, seen)
+    path = pipeline.collect_lock_path("kr")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as other:                     # another process's lock
+        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(pipeline.LabError, match="already running"):
+            pipeline.collect_minute("kr", None)
+    assert seen == []                                  # refused before touching any symbol
+    pipeline.collect_minute("kr", None)                # released: runs
+    assert seen == ["A", "B", "C"]
+
+
+def test_collector_holds_the_lock_for_the_whole_run(monkeypatch):
+    seen = []
+    pipeline = _fake_run(monkeypatch, seen)
+    held = []
+    monkeypatch.setattr(pipeline, "collect_minutes",
+                        lambda c, m, s, since, today: held.append(pipeline.collect_running(m))
+                        or cm.MinuteReport(1, True))
+    pipeline.collect_minute("kr", None)
+    assert held == [True, True, True]
+    assert not pipeline.collect_running("kr")          # released afterwards
+
+
+def test_lock_released_after_a_failed_run(monkeypatch):
+    seen = []
+    pipeline = _fake_run(monkeypatch, seen)
+
+    def boom(c, m, s, since, today):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(pipeline, "collect_minutes", boom)
+    with pytest.raises(KeyboardInterrupt):
+        pipeline.collect_minute("kr", None)
+    assert not pipeline.collect_running("kr")
+
+
+def test_limited_run_marks_and_full_run_clears(monkeypatch):
+    seen = []
+    pipeline = _fake_run(monkeypatch, seen)
+    marker = pipeline.minute_limited_marker("kr")
+    pipeline.collect_minute("kr", 2)
+    assert seen == ["A", "B"] and marker.exists()
+    assert "--limit 2" in marker.read_text()
+    pipeline.collect_minute("kr", None)
+    assert not marker.exists()
+
+
+def test_aborted_full_run_keeps_the_limited_marker(monkeypatch):
+    seen = []
+    pipeline = _fake_run(monkeypatch, seen)
+    pipeline.collect_minute("kr", 1)
+
+    def boom(c, m, s, since, today):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(pipeline, "collect_minutes", boom)
+    with pytest.raises(KeyboardInterrupt):
+        pipeline.collect_minute("kr", None)
+    assert pipeline.minute_limited_marker("kr").exists()

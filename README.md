@@ -16,8 +16,10 @@ uv run lab --help      # sync → collect → screen → validate → verify --f
   보충합니다. 자세한 내용은 `research/journal/`을 보세요.
 - 전진 시험: `uv run lab forward-register --market kr` (한 번) → `uv run lab forward --market kr`. 매일 자동 갱신은 `scripts/daily_kr.sh` + `scripts/com.autotrade.daily-kr.plist`(`__ROOT__`를 저장소 경로로 바꿔 `~/Library/LaunchAgents/`에 두고 `launchctl bootstrap gui/$(id -u) <plist>`).
 - 단타 연구실(1분봉): `uv run lab collect-minute --market kr|us`로 1분봉을 모읍니다. 이어받기가 되고, 일일
-  작업이 `data/logs/.lock`을 쥐고 있으면 끝날 때까지 기다리며, 전체 유니버스는 며칠 걸립니다. 이후
-  `uv run lab screen --pocket daytrade --market kr|us` → `uv run lab validate --pocket daytrade --market kr|us`.
+  작업이 `data/logs/.lock`을 쥐고 있으면 끝날 때까지 기다리며, 전체 유니버스는 며칠 걸립니다. 시장마다
+  한 번에 하나만 돕니다(`data/{market}/1m/.collect.lock`). 수집이 끝난 뒤(모든 종목 `_complete`, `--limit`
+  표시 `.limited` 없음, 수집 중 아님) `uv run lab screen --pocket daytrade --market kr|us` →
+  `uv run lab validate --pocket daytrade --market kr|us`. 그 전에는 둘 다 거부합니다.
   단타 `verify --final`(분봉 Nautilus)은 아직 없습니다(계획 2b). 한계는 리포트의 한계 목록을 보세요.
 - 설계: `docs/superpowers/specs/` · 선행 조사: `research/2026-11-19-prior-art.md`
 

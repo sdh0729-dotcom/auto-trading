@@ -151,3 +151,17 @@ def test_record_round_trip(tmp_data):
     rec = load_overlay_record()
     assert rec == {"date": "2026-11-22", "from": "2025-03-04", "requested": 6, "applied": 3,
                    "mismatch": 1, "empty": 0, "failed": 2}
+
+
+def test_rounding_overshoot_is_absorbed_but_real_errors_stay(tmp_data, monkeypatch):
+    from autotrade.data.quality import hard_issues
+    raw = pykrx_raw()
+    d1, d2 = pd.Timestamp("2025-03-05"), pd.Timestamp("2025-03-06")
+    raw.loc[d1, ["시가", "고가", "저가", "종가"]] = [819275, 876387, 814351, 876388]  # 1 won
+    raw.loc[d2, ["시가", "고가", "저가", "종가"]] = [100, 101, 99, 110]               # 9%
+    monkeypatch.setattr(krx_overlay, "_pykrx_ohlcv", lambda *a, **k: raw)
+    df = krx_overlay.fetch_krx_daily("A", date(2025, 1, 17), date(2025, 4, 1))
+    assert df.loc[d1, "high"] == 876388 and df.loc[d1, "low"] == 814351
+    assert df.loc[d2, "high"] == 101                       # not hidden
+    assert any("ohlc" in i for i in hard_issues(df))
+    assert hard_issues(df.drop(d2)) == []

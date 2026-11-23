@@ -49,6 +49,7 @@ from nautilus_trader.trading.strategy import Strategy
 from autotrade.config import PocketConfig
 from autotrade.costs import CostModel
 from autotrade.sizing import RiskState, decide_entry
+from autotrade.types import EqualWeight
 from autotrade.types import TRADE_COLUMNS
 
 SIGNAL_COLUMNS = ["date", "symbol", "entry", "exit", "stop_pct", "confidence", "gap",
@@ -99,6 +100,8 @@ class SignalStrategyConfig(StrategyConfig, frozen=True):
     max_positions: int | None = None
     drawdown_stop: float | None = None
     fractional: bool = False
+    equal_slots: int | None = None       # Signals.equal_weight (rotation sizing), else risk
+    equal_max_weight: float | None = None
     open_time: str = "09:00"
     close_time: str = "15:30"
     bar_spec: str = "1-DAY-LAST-EXTERNAL"
@@ -137,6 +140,8 @@ class SignalStrategy(Strategy):
         self.pocket = PocketConfig(config.risk_per_trade, config.max_position_weight,
                                    config.daily_loss_stop, config.max_positions,
                                    config.drawdown_stop)
+        self._equal_weight = None if config.equal_slots is None else \
+            EqualWeight(config.equal_slots, config.equal_max_weight)
         frame = pd.read_parquet(config.signals_path)
         frame = frame[frame["symbol"].isin(config.symbols)]
         self.dates = pd.DatetimeIndex(sorted(frame["date"].unique()))
@@ -288,7 +293,8 @@ class SignalStrategy(Strategy):
             sp, conf, gap = (float(sig[k][sig_row]) for k in ("stop_pct", "confidence", "gap"))
             px = price[sym]
             qty, buy_cash, reason = decide_entry(self._risk, n_open, cash, sym, px, sp, conf,
-                                                 gap, self.cm, self.config.fractional)
+                                                 gap, self.cm, self.config.fractional,
+                                                 self._equal_weight)
             pending = self.config.entry_at == "close" and self.config.exit_at == "next_open" \
                 and bool(sig["exit"][sig_row])
             inst = self.cache.instrument(self._iid[sym])

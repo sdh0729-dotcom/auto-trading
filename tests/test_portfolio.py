@@ -298,3 +298,47 @@ def test_close_entry_with_same_day_data_end_is_closed():
     res = run([cand("A", 3, 3, reason="data_end"), cand("B", 5, 8)], p, pocket=pocket,
               entry_at="close", exit_at="close")
     assert set(res.fills["symbol"]) == {"A", "B"} and res.skipped.empty
+
+
+# ---- equal-weight sizing (rotation families: momentum, etf_rotation)
+from autotrade.types import EqualWeight  # noqa: E402
+
+
+def test_equal_weight_sizes_a_slot_at_equity_over_slots_capped_by_the_pocket():
+    # 1,000,000 / 3 slots = 333,333 -> pocket cap 25% = 250,000 -> 2,500 shares at 100
+    res = run_portfolio(pd.DataFrame([cand("A", 1, 3)], columns=TRADE_COLUMNS),
+                        panel({"A": 100.0}), FREE, POCKET, 1_000_000.0, 1.0, True,
+                        entry_at="next_open", exit_at="next_open",
+                        equal_weight=EqualWeight(slots=3))
+    assert res.fills["qty"].iloc[0] == pytest.approx(2500)
+
+
+def test_equal_weight_with_its_own_cap_ignores_stop_and_confidence():
+    # max_weight 1.0, 2 slots -> 500,000 per slot whatever the stop (20%) and confidence (0.3)
+    res = run_portfolio(pd.DataFrame([cand("A", 1, 3, stop=0.20, conf=0.3)], columns=TRADE_COLUMNS),
+                        panel({"A": 100.0}), FREE, POCKET, 1_000_000.0, 1.0, False,
+                        entry_at="next_open", exit_at="next_open",
+                        equal_weight=EqualWeight(slots=2, max_weight=1.0))
+    assert res.fills["qty"].iloc[0] == 5000
+
+
+def test_equal_weight_entry_shrinks_to_the_cash_left():
+    # A (1 slot of 2, 500,000) doubles; on day 6 equity is 1,500,000 -> B's target 750,000,
+    # but only 500,000 cash is left: B buys 5,000 shares instead of being skipped
+    closes = {"A": [100.0] * 4 + [200.0] * 26, "B": 100.0}
+    res = run_portfolio(pd.DataFrame([cand("A", 1, 20), cand("B", 6, 20)], columns=TRADE_COLUMNS),
+                        panel(closes), FREE, POCKET, 1_000_000.0, 1.0, False,
+                        entry_at="next_open", exit_at="next_open",
+                        equal_weight=EqualWeight(slots=2, max_weight=1.0))
+    q = dict(zip(res.fills["symbol"], res.fills["qty"]))
+    assert q == {"A": 5000, "B": 5000} and res.skipped.empty
+
+
+def test_equal_weight_still_obeys_the_drawdown_stop():
+    closes = {"A": [100.0] * 3 + [80.0] * 27, "B": 100.0}          # -20% on a 100% position
+    res = run_portfolio(pd.DataFrame([cand("A", 1, 5, exit_price=80.0), cand("B", 8, 10)],
+                                     columns=TRADE_COLUMNS),
+                        panel(closes), FREE, POCKET, 1_000_000.0, 1.0, True,
+                        entry_at="next_open", exit_at="next_open",
+                        equal_weight=EqualWeight(slots=1, max_weight=1.0))
+    assert reasons(res) == {"B": "drawdown_stop"}

@@ -188,6 +188,9 @@ def run_nautilus(rule: Rule, panel: Panel, eligible: pd.DataFrame, start: date, 
                 max_position_weight=pocket.max_position_weight,
                 daily_loss_stop=pocket.daily_loss_stop, max_positions=pocket.max_positions,
                 drawdown_stop=pocket.drawdown_stop, fractional=fractional,
+                equal_slots=None if signals.equal_weight is None else signals.equal_weight.slots,
+                equal_max_weight=None if signals.equal_weight is None
+                else signals.equal_weight.max_weight,
                 open_time=open_time, close_time=close_time, bar_spec=BAR_SPEC)
             strategy = SignalStrategy(config, cost_model)
         engine.add_strategy(strategy)

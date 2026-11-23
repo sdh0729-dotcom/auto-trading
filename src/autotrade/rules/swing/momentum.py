@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from autotrade.rules.base import BaseRule, atr_stop, finalize, in_universe
-from autotrade.types import Panel, Signals
+from autotrade.types import EqualWeight, Panel, Signals
 
 LOOKBACK = [21, 63]
 REBALANCE = [10, 20]  # trading days (global cap: hold <= 20, so not calendar-monthly)
@@ -20,6 +20,7 @@ class Momentum(BaseRule):
     (`eligible`, all symbols without it); exit everything outside top-k.
 
     max_hold_days = rebalance. Rebalance rows are positional (i % rebalance == 0).
+    Sized equal-weight over top_k slots (pocket per-position cap applies: single stocks).
     """
     family = "momentum"
     PARAM_KEYS = ("lookback", "rebalance", "top_k", "k")
@@ -41,4 +42,4 @@ class Momentum(BaseRule):
         exits = reb & ~(rank <= tk)
         conf = (tk - rank + 1) / tk
         return finalize(panel, top, exits, atr_stop(panel, k), conf,
-                        "next_open", "next_open", rb)
+                        "next_open", "next_open", rb, equal_weight=EqualWeight(tk))

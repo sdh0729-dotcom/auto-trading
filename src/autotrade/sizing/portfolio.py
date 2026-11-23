@@ -19,7 +19,7 @@ import pandas as pd
 
 from autotrade.config import PocketConfig
 from autotrade.costs import CostModel
-from autotrade.types import TRADE_COLUMNS, Panel
+from autotrade.types import TRADE_COLUMNS, EqualWeight, Panel
 
 FILL_COLUMNS = TRADE_COLUMNS + ["qty", "net_pnl", "net_r"]
 SKIP_COLUMNS = TRADE_COLUMNS + ["reason"]
@@ -72,13 +72,17 @@ class RiskState:
 
 def decide_entry(risk: RiskState, n_open: int, cash: float, symbol: str, entry_price: float,
                  stop_pct: float, confidence: float, gap: float, cost_model: CostModel,
-                 fractional: bool) -> tuple[float, float, str | None]:
+                 fractional: bool, equal_weight: EqualWeight | None = None
+                 ) -> tuple[float, float, str | None]:
     """Size one entry candidate -> (qty, buy_cash, skip_reason or None).
 
-    qty = min(equity * risk_per_trade * confidence / (price * (stop_pct + gap)),
-              equity * max_position_weight / price), floored unless fractional; equity is
-    the prior-close mark. Skip precedence: drawdown_stop, daily_loss_stop, max_positions,
-    too_small, cash."""
+    Risk sizing (default): qty = min(equity * risk_per_trade * confidence /
+    (price * (stop_pct + gap)), equity * max_position_weight / price).
+    Equal weight (rotation rules): qty = equity * min(1 / slots, cap) / price with cap =
+    equal_weight.max_weight or the pocket's max_position_weight; when the cash left cannot
+    pay for it, the entry shrinks to the cash instead of being skipped.
+    qty is floored unless fractional; equity is the prior-close mark. Skip precedence:
+    drawdown_stop, daily_loss_stop, max_positions, too_small, cash."""
     pocket = risk.pocket
     if risk.latched:
         return 0.0, 0.0, "drawdown_stop"
@@ -87,13 +91,28 @@ def decide_entry(risk: RiskState, n_open: int, cash: float, symbol: str, entry_p
     if pocket.max_positions is not None and n_open >= pocket.max_positions:
         return 0.0, 0.0, "max_positions"
     eq = risk.prev_eq
-    risk_qty = eq * pocket.risk_per_trade * confidence / (entry_price * (stop_pct + gap))
-    qty = min(risk_qty, eq * pocket.max_position_weight / entry_price)
+    if equal_weight is None:
+        risk_qty = eq * pocket.risk_per_trade * confidence / (entry_price * (stop_pct + gap))
+        qty = min(risk_qty, eq * pocket.max_position_weight / entry_price)
+    else:
+        cap = pocket.max_position_weight if equal_weight.max_weight is None \
+            else equal_weight.max_weight
+        qty = eq * min(1.0 / equal_weight.slots, cap) / entry_price
     if not fractional:
         qty = float(np.floor(qty))
     if not qty > 0:
         return qty, 0.0, "too_small"
     buy_cash = cost_model.fill_cash(symbol, "buy", qty, entry_price)
+    if buy_cash > cash and equal_weight is not None and cash > 0:
+        qty = qty * cash / buy_cash
+        if not fractional:
+            qty = float(np.floor(qty))
+        buy_cash = cost_model.fill_cash(symbol, "buy", qty, entry_price) if qty > 0 else 0.0
+        if buy_cash > cash:               # float rounding or a minimum fee: one step down
+            qty = qty - 1.0 if not fractional else qty * (1 - 1e-6)
+            buy_cash = cost_model.fill_cash(symbol, "buy", qty, entry_price) if qty > 0 else 0.0
+        if not qty > 0:
+            return qty, 0.0, "cash"
     if buy_cash > cash:
         return qty, buy_cash, "cash"
     return qty, buy_cash, None
@@ -110,7 +129,8 @@ def _exit_phase(exit_reason: str, exit_at: str) -> str:
 
 def run_portfolio(candidates: pd.DataFrame, panel: Panel, cost_model: CostModel,
                   pocket: PocketConfig, capital: float, currency_per_krw: float,
-                  fractional: bool, *, entry_at: str, exit_at: str) -> PortfolioResult:
+                  fractional: bool, *, entry_at: str, exit_at: str,
+                  equal_weight: EqualWeight | None = None) -> PortfolioResult:
     """`entry_at` / `exit_at` are the rule's Signals timing ("next_open" | "close"); they
     place each candidate's fills in the day's physical order (see module docstring)."""
     if entry_at not in ("next_open", "close") or exit_at not in ("next_open", "close"):
@@ -164,7 +184,8 @@ def run_portfolio(candidates: pd.DataFrame, panel: Panel, cost_model: CostModel,
         for i, t in day.iterrows():
             qty, buy_cash, reason = decide_entry(
                 risk, len(open_pos), cash, t.symbol, t.entry_price, t.stop_pct,
-                t.confidence, gap_allowance(panel, t.symbol, d), cost_model, fractional)
+                t.confidence, gap_allowance(panel, t.symbol, d), cost_model, fractional,
+                equal_weight)
             if reason:
                 skipped.append({**t.to_dict(), "reason": reason})
             else:

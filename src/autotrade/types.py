@@ -41,6 +41,15 @@ class Panel:
         return list(self.close.columns)
 
 
+@dataclass(frozen=True)
+class EqualWeight:
+    """Rotation sizing: each entry gets equity / slots (prior-close equity), capped at
+    max_weight of equity (None: the pocket's max_position_weight), independent of the stop
+    and confidence. Without it a rule is sized by risk (risk_per_trade / stop)."""
+    slots: int
+    max_weight: float | None = None
+
+
 @dataclass
 class Signals:
     entries: pd.DataFrame
@@ -50,3 +59,4 @@ class Signals:
     entry_at: Literal["next_open", "close"]
     exit_at: Literal["next_open", "close"]
     max_hold_days: int
+    equal_weight: EqualWeight | None = None

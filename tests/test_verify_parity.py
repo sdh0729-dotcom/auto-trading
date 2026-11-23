@@ -279,3 +279,27 @@ def test_run_nautilus_passes_the_eligibility_mask_to_signals():
     got = rule.seen_eligible
     assert got is not None and got.index.equals(p.close.index[:16])
     pd.testing.assert_frame_equal(got, elig.iloc[:16])
+
+
+@pytest.mark.parametrize("family,params", [
+    ("momentum", {"lookback": 21, "rebalance": 10, "top_k": 3, "k": 2.0}),
+    ("etf_rotation", {"lookback": 63, "rebalance": 10, "top_k": 2, "k": 3.0}),
+])
+def test_parity_equal_weight_rotation(family, params):
+    """Equal-weight sizing goes through the shared decide_entry in both engines."""
+    syms = ["E1", "E2", "E3", "069500"]
+    p = make_panel(300, syms, seed=21, products={s: "etf" for s in syms})
+    rule = SWING_FAMILIES[family](params)
+    sig = rule.signals(p)
+    assert sig.equal_weight is not None
+    elig = all_true_mask(p)
+    cm = CostModel(KR, lambda s: "etf")
+    ours = run_portfolio(simulate(p, sig, elig, START, END), p, cm, SWING, 5_000_000, 1.0,
+                         False, entry_at=sig.entry_at, exit_at=sig.exit_at,
+                         equal_weight=sig.equal_weight).fills
+    naut = run_nautilus(rule, p, elig, START, END, cm, SWING, 5_000_000, 1.0, False)
+    assert len(ours) > 0 and len(naut) == len(ours)
+    rep = parity_report(ours, naut)
+    assert rep["matched_share"] == 1.0
+    assert np.allclose(naut["qty"].to_numpy(), ours["qty"].to_numpy())
+    assert np.allclose(naut["net_pnl"].sum(), ours["net_pnl"].sum(), rtol=0.01)

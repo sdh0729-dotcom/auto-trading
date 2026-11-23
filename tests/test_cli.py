@@ -485,7 +485,8 @@ def test_verify_scenarios_wiring_us(cli_env, monkeypatch):
         (per.sealed[0], per.sealed[1], 5_000_000, cpk, False),
         (per.sealed[0], per.sealed[1], 50_000, cpk, True)]
     assert all(c[5] == pd.Timestamp(per.sealed[1]) for c in naut_calls)  # warm-up history
-    timing = {"entry_at": "next_open", "exit_at": "next_open"}           # breakout
+    timing = {"entry_at": "next_open", "exit_at": "next_open",           # breakout:
+              "equal_weight": None}                                       # risk sizing
     assert [c[:3] for c in port_calls] == [(5_000_000, cpk, False)] * 2 + \
         [(50_000, cpk, True)] * 2                     # sealed (parity) + valid per scenario
     assert all(c[3] == timing for c in port_calls)

@@ -7,7 +7,7 @@ from typing import ClassVar, Protocol
 import pandas as pd
 
 from autotrade.rules.indicators import atr
-from autotrade.types import Panel, Signals
+from autotrade.types import EqualWeight, Panel, Signals
 
 
 class Rule(Protocol):
@@ -59,10 +59,11 @@ def atr_stop(panel: Panel, k: float) -> pd.DataFrame:
 
 
 def finalize(panel: Panel, entries: pd.DataFrame, exits: pd.DataFrame, stop: pd.DataFrame,
-             conf: pd.DataFrame, entry_at: str, exit_at: str, max_hold_days: int) -> Signals:
+             conf: pd.DataFrame, entry_at: str, exit_at: str, max_hold_days: int,
+             equal_weight: EqualWeight | None = None) -> Signals:
     """Drop entries lacking a valid stop (e.g. ATR warm-up), force bool dtypes, clip confidence."""
     entries = (entries.fillna(False).astype(bool)) & (stop > 0)
     exits = exits.fillna(False).astype(bool)
     return Signals(entries=entries, exits=exits, stop_pct=stop,
                    confidence=conf.clip(0, 1), entry_at=entry_at, exit_at=exit_at,
-                   max_hold_days=max_hold_days)
+                   max_hold_days=max_hold_days, equal_weight=equal_weight)

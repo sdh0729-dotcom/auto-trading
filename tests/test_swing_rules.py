@@ -1,8 +1,10 @@
+import numpy as np
 import pandas as pd
 import pytest
 
 from autotrade.rules.registry import SWING_FAMILIES
 from autotrade.rules.swing.breakout import Breakout
+from autotrade.types import EqualWeight
 from tests.fixtures import make_panel
 
 
@@ -52,7 +54,7 @@ def test_grid_size_capped():
 
 def test_registry_has_all_families():
     assert set(SWING_FAMILIES) == {"breakout", "ma_trend", "oversold", "momentum",
-                                   "reversal", "overnight", "tom"}
+                                   "reversal", "overnight", "tom", "etf_rotation"}
 
 
 def test_rule_id_stable():
@@ -161,7 +163,7 @@ def test_reversal_ranks_only_eligible_symbols():
         assert s.entries.iloc[60].sum() == 1 and s.entries.iloc[60][others.idxmax()]
 
 
-@pytest.mark.parametrize("family", sorted(set(SWING_FAMILIES) - {"momentum", "reversal"}))
+@pytest.mark.parametrize("family", sorted(set(SWING_FAMILIES) - {"momentum", "reversal", "etf_rotation"}))
 def test_other_families_ignore_eligible(family):
     p = make_panel(300, ["A", "B", "C"], seed=5, products={s: "etf" for s in "ABC"})
     rule = SWING_FAMILIES[family](SWING_FAMILIES[family].grid()[0])
@@ -172,9 +174,10 @@ def test_other_families_ignore_eligible(family):
     pd.testing.assert_frame_equal(a.exits, b.exits)
 
 
-@pytest.mark.parametrize("family", ["momentum", "reversal"])
+@pytest.mark.parametrize("family", ["momentum", "reversal", "etf_rotation"])
 def test_ranking_with_universe_ignores_future(family):
-    p = make_panel(400, [f"S{i}" for i in range(6)], seed=4)
+    p = make_panel(400, [f"S{i}" for i in range(6)], seed=4,
+                   products={f"S{i}": "etf" for i in range(3)})
     lab = load_lab()
     rule = SWING_FAMILIES[family](SWING_FAMILIES[family].grid()[0])
     mc, pc = load_market_raw("us"), load_pocket("swing")
@@ -225,3 +228,37 @@ def test_tom_final_month_needs_a_known_month_end():
     # a calendar that ends at the panel end tells nothing more
     mid = full.slice(idx[0], pd.Timestamp("2016-02-25"))
     assert not _tom_entries(replace(mid, calendar=mid.close.index)).loc["2016-02"].any()
+
+
+def test_rotation_families_size_equal_weight_and_others_by_risk():
+    p = make_panel(300, ["A", "B", "C", "D"], seed=8, products={s: "etf" for s in "ABCD"})
+    mom = SWING_FAMILIES["momentum"]({"lookback": 21, "rebalance": 10, "top_k": 3, "k": 2})
+    assert mom.signals(p).equal_weight == EqualWeight(slots=3, max_weight=None)  # pocket cap
+    rot = SWING_FAMILIES["etf_rotation"]({"lookback": 63, "rebalance": 20, "top_k": 2, "k": 3})
+    assert rot.signals(p).equal_weight == EqualWeight(slots=2, max_weight=1.0)
+    assert Breakout(Breakout.grid()[0]).signals(p).equal_weight is None
+
+
+def test_etf_rotation_holds_only_etfs_with_a_positive_lookback_return():
+    p = make_panel(400, ["E1", "E2", "E3", "S"], seed=9,
+                   products={"E1": "etf", "E2": "etf", "E3": "etf", "S": "stock"})
+    n = len(p.close)
+    p.close["S"] = 100 * np.exp(np.linspace(0, 4, n))      # best return, but a stock
+    p.close["E1"] = 100 * np.exp(np.linspace(0, 1, n))     # best ETF
+    p.close["E2"] = 100 * np.exp(np.linspace(0, -1, n))    # falling: absolute momentum < 0
+    p.close["E3"] = 100 * np.exp(np.linspace(0, 0.5, n))
+    rule = SWING_FAMILIES["etf_rotation"]({"lookback": 63, "rebalance": 20, "top_k": 2, "k": 3})
+    s = rule.signals(p)
+    assert not s.entries["S"].any() and not s.entries["E2"].any()
+    reb = s.entries.iloc[80::20]
+    assert reb["E1"].all() and reb["E3"].all()
+    assert s.max_hold_days == 20 and s.entry_at == "next_open"
+
+
+def test_etf_rotation_goes_to_cash_when_every_etf_falls():
+    p = make_panel(300, ["E1", "E2"], seed=9, products={"E1": "etf", "E2": "etf"})
+    n = len(p.close)
+    p.close["E1"] = 100 * np.exp(np.linspace(0, -1, n))
+    p.close["E2"] = 100 * np.exp(np.linspace(0, -0.5, n))
+    rule = SWING_FAMILIES["etf_rotation"]({"lookback": 63, "rebalance": 10, "top_k": 1, "k": 3})
+    assert not rule.signals(p).entries.any().any()

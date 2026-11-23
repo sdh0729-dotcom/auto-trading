@@ -631,7 +631,8 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
             trades = simulate(panel, sig, elig, a, b)
             seg_sums.append(float(cm.net_returns(trades)["net_return"].sum()))
         res = run_portfolio(simulate(panel, sig, elig, v0, v1), panel, cm, s.pocket, capital,
-                            cpk, False, entry_at=sig.entry_at, exit_at=sig.exit_at)
+                            cpk, False, entry_at=sig.entry_at, exit_at=sig.exit_at,
+                            equal_weight=sig.equal_weight)
         eq = period_equity(res, cal, v0, v1, capital * cpk)
         rets = eq.pct_change().dropna()
         returns[rid] = rets
@@ -760,12 +761,13 @@ def _final_scenarios(rule, panel: Panel, s: Setup, pbo: float, n_trials: int,
         vsig = rule.signals(vpanel, eligible=velig)          # history through valid end
         naut = run_nautilus(rule, panel, elig, s0, s1, cm, s.pocket, capital, cpk, frac)
         ours = run_portfolio(simulate(panel, sig, elig, s0, s1), panel, cm, s.pocket, capital,
-                             cpk, frac, entry_at=sig.entry_at, exit_at=sig.exit_at)
+                             cpk, frac, entry_at=sig.entry_at, exit_at=sig.exit_at,
+                             equal_weight=sig.equal_weight)
         parity[scen] = _parity_summary(parity_report(ours.fills, naut))
         sealed_res = nautilus_result(naut, panel, cm, cap0, s0, s1)
         valid_res = run_portfolio(simulate(vpanel, vsig, velig, v0, v1), vpanel, cm, s.pocket,
                                   capital, cpk, frac, entry_at=vsig.entry_at,
-                                  exit_at=vsig.exit_at)
+                                  exit_at=vsig.exit_at, equal_weight=vsig.equal_weight)
         if sr_var is None:      # conservative fallback: the sealed Sharpe itself, squared
             sr = sharpe(_daily_returns(sealed_res, cal, (s0, s1), cap0).to_numpy(),
                         periods_per_year=1)

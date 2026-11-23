@@ -143,7 +143,7 @@ def collect_minutes(client: TossClient, market: Market, symbol: str, since: date
         if buf:
             out = pd.concat(buf).sort_index()
             buf.clear()
-            save_minutes(market, symbol, out)
+            save_minutes(market, symbol, out, newest_first=True)
             added += len(out)
 
     mismatch = False

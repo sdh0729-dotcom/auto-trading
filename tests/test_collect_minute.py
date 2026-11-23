@@ -201,9 +201,9 @@ def _spy_saves(monkeypatch):
     calls = []
     real = cm.save_minutes
 
-    def spy(market, symbol, df):
+    def spy(market, symbol, df, **kw):
         calls.append(len(df))
-        return real(market, symbol, df)
+        return real(market, symbol, df, **kw)
 
     monkeypatch.setattr(cm, "save_minutes", spy)
     return calls
@@ -251,3 +251,54 @@ def test_mismatch_detected_inside_a_buffer():
     assert rep.complete and list(df.index) == _full_ts(c)
     assert rep.added == len(df) == 3 * BARS_PER_DAY
     assert df["open"].max() < 100.0                           # a single (post-split) scale
+
+
+def _fail_second_write(monkeypatch):
+    import autotrade.data.minute_store as ms
+
+    real, n = ms.write_parquet_atomic, [0]
+
+    def flaky(df, path):
+        n[0] += 1
+        if n[0] == 2:
+            raise OSError("interrupted between month files")
+        return real(df, path)
+
+    monkeypatch.setattr(ms, "write_parquet_atomic", flaky)
+    return lambda: monkeypatch.setattr(ms, "write_parquet_atomic", real)
+
+
+def _assert_contiguous(c, got):
+    full = _full_ts(c)
+    assert len(got) and list(got.index) == full[full.index(got.index[0]):full.index(got.index[-1]) + 1]
+
+
+def test_backward_partial_flush_stays_contiguous(monkeypatch):
+    c = FakeMinuteClient(n_days=31)
+    today = TODAY + pd.Timedelta(days=60)
+    restore = _fail_second_write(monkeypatch)
+    with pytest.raises(OSError):
+        cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), today)
+    got = _stored(c)
+    assert got.index[-1] == _full_ts(c)[-1]            # the newest month landed first
+    _assert_contiguous(c, got)
+    restore()
+    rep = cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), today)
+    assert rep.complete and list(_stored(c).index) == _full_ts(c)
+
+
+def test_forward_partial_write_stays_contiguous(monkeypatch):
+    c = FakeMinuteClient(n_days=21)                    # 2024-01-02 .. 01-30
+    today = TODAY + pd.Timedelta(days=60)
+    cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), today)
+    for _ in range(5):
+        c.add_day()                                    # 01-31 .. 02-06: spans the month edge
+    restore = _fail_second_write(monkeypatch)
+    with pytest.raises(OSError):
+        cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), today)
+    got = _stored(c)
+    assert got.index[0] == _full_ts(c)[0]
+    _assert_contiguous(c, got)
+    restore()
+    rep = cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), today)
+    assert rep.complete and list(_stored(c).index) == _full_ts(c)

@@ -37,7 +37,11 @@ def regular_session(df: pd.DataFrame, market_cfg) -> pd.DataFrame:
     return df[keep]
 
 
-def save_minutes(market: Market, symbol: str, df: pd.DataFrame) -> None:
+def save_minutes(market: Market, symbol: str, df: pd.DataFrame,
+                 newest_first: bool = False) -> None:
+    """Merge `df` into the month files, one atomic file at a time. An interrupted call keeps
+    the stored range gap-free only if the month order matches where `df` sits: oldest first
+    for bars newer than the stored ones (default), `newest_first` for older ones."""
     if df.empty:
         return
     new = df[MINUTE_COLUMNS].copy()
@@ -46,7 +50,7 @@ def save_minutes(market: Market, symbol: str, df: pd.DataFrame) -> None:
     new.index = new.index.tz_localize(tz) if new.index.tz is None else new.index.tz_convert(tz)
     d = minute_dir(market, symbol)
     months = new.index.strftime("%Y-%m")
-    for month in sorted(set(months)):
+    for month in sorted(set(months), reverse=newest_first):
         part = new[months == month]
         path = d / f"{month}.parquet"
         if path.exists():

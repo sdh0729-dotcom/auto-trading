@@ -78,26 +78,17 @@ def _stack_features(per_symbol: dict[str, pd.DataFrame]) -> pd.DataFrame:
     return out
 
 
-def screen_intraday(family: str, market: str, symbols: list[str], start: date, end: date,
+def intraday_trades(grid: list, market: str, symbols: list[str], start: date, end: date,
                     daily: Panel, eligible: pd.DataFrame, cost_model: CostModel,
-                    rules: SessionRules, log: ExperimentLog, pocket: str,
-                    sealed_start: date, cost_r_max: float) -> pd.DataFrame:
-    """One row per grid params (as `screen_family`). Minute bars are loaded per symbol only
-    through `end`. Pass 1 builds the family's day features, then `select` picks the
-    symbol-days per grid point and every symbol's bars are loaded once more to build and
-    execute the candidates of all grid points. A grid point whose median round-trip cost
-    exceeds `cost_r_max` (lab.criteria) of its median stop is logged as stage "precheck" and skipped."""
-    if pd.Timestamp(end) >= pd.Timestamp(sealed_start):
-        raise SealViolation(f"screen end {end} reaches sealed period starting {sealed_start}")
-    if pd.Timestamp(start) > pd.Timestamp(end):
-        raise ValueError(f"start {start} is after end {end}")
-    cls = DAYTRADE_FAMILIES[family]
-    grid = [cls(p) for p in cls.grid()]
+                    rules: SessionRules) -> tuple[dict, dict]:
+    """Executed same-day trades of every rule in `grid` (one family) over [start, end]:
+    -> ({rule_id: [trade frames]}, {rule_id: ([round-trip cost pct per candidate],
+    [stop_pct per candidate])}). Minute bars are loaded per symbol only through `end`; the
+    shared core of the screen (train) and validate (valid) trade generation."""
     t0, t1 = pd.Timestamp(start), pd.Timestamp(end)
-    period = (t0.date().isoformat(), t1.date().isoformat())
     elig = eligible.loc[(eligible.index >= t0) & (eligible.index <= t1)]
     feats = pd.DataFrame(index=pd.MultiIndex.from_arrays([[], []], names=["day", "symbol"]))
-    if cls.needs_features():
+    if type(grid[0]).needs_features():
         per = {s: grid[0].day_features(s, load_minutes(market, s, start, end))
                for s in symbols}
         feats = _stack_features(per)
@@ -136,6 +127,28 @@ def screen_intraday(family: str, market: str, symbols: list[str], start: date, e
                          product=product.get(sym, "stock"))
             if len(tr):
                 trades[rule.rule_id].append(tr)
+    return trades, cost
+
+
+def screen_intraday(family: str, market: str, symbols: list[str], start: date, end: date,
+                    daily: Panel, eligible: pd.DataFrame, cost_model: CostModel,
+                    rules: SessionRules, log: ExperimentLog, pocket: str,
+                    sealed_start: date, cost_r_max: float) -> pd.DataFrame:
+    """One row per grid params (as `screen_family`). Minute bars are loaded per symbol only
+    through `end`. Pass 1 builds the family's day features, then `select` picks the
+    symbol-days per grid point and every symbol's bars are loaded once more to build and
+    execute the candidates of all grid points. A grid point whose median round-trip cost
+    exceeds `cost_r_max` (lab.criteria) of its median stop is logged as stage "precheck" and skipped."""
+    if pd.Timestamp(end) >= pd.Timestamp(sealed_start):
+        raise SealViolation(f"screen end {end} reaches sealed period starting {sealed_start}")
+    if pd.Timestamp(start) > pd.Timestamp(end):
+        raise ValueError(f"start {start} is after end {end}")
+    cls = DAYTRADE_FAMILIES[family]
+    grid = [cls(p) for p in cls.grid()]
+    t0, t1 = pd.Timestamp(start), pd.Timestamp(end)
+    period = (t0.date().isoformat(), t1.date().isoformat())
+    trades, cost = intraday_trades(grid, market, symbols, start, end, daily, eligible,
+                                   cost_model, rules)
     out = []
     for rule in grid:
         pcts, stops = cost[rule.rule_id]

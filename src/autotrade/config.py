@@ -108,6 +108,7 @@ class PocketConfig:
     max_positions: int | None = None
     drawdown_stop: float | None = None
     hold_days: tuple[int, int] | None = None
+    benchmark_gate: bool = True       # validate recommends only rules beating the benchmark
 
 
 @dataclass(frozen=True)

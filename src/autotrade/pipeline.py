@@ -46,11 +46,13 @@ from autotrade.report import (CONFIDENCE_FORMULAS, RuleCard, limitations, write_
                               write_rule_card)
 from autotrade.rules.registry import DAYTRADE_FAMILIES, SWING_FAMILIES
 from autotrade.screen.intraday import SessionRules
-from autotrade.screen.run import MIN_TRAIN_TRADES, screen_family, screen_intraday
+from autotrade.screen.run import (MIN_TRAIN_TRADES, intraday_trades, screen_family,
+                                  screen_intraday)
 from autotrade.screen.simulate import simulate
 from autotrade.sizing import PortfolioResult, run_portfolio
+from autotrade.sizing.intraday import local_day, run_intraday_portfolio
 from autotrade.toss.client import TossApiError, make_client_from_env
-from autotrade.types import Panel
+from autotrade.types import TRADE_COLUMNS, Panel
 from autotrade.universe.build import eligible_mask
 from autotrade.validate.criteria import evaluate, period_equity
 from autotrade.validate.experiments import ExperimentLog
@@ -698,8 +700,16 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     picks the candidates printed and recommended: the first `top` by train mean_net_r;
     recommend up to max_final_candidates of them with valid net_pnl > 0 and a valid return
     (net_pnl / capital) above the market benchmark's buy-and-hold return, by valid daily
-    Sharpe. Every run increments the period file's validate_runs counter."""
-    _swing_only(pocket, "validate")
+    Sharpe. Every run increments the period file's validate_runs counter.
+
+    daytrade: the same pool / segments / PBO / logging, but the valid trades are the executed
+    same-day trades of the rule on the valid period (minute bars loaded only through the valid
+    end; the segments cut those trades by entry day), the portfolio is
+    `run_intraday_portfolio`, and the benchmark gate applies only when the pocket's
+    `benchmark_gate` is true (daytrade: false). Daily returns include the first day's return
+    from the initial capital and zero days; metrics add valid_mean_daily_return,
+    valid_positive_day_share (share of days with return > 0 among the days with at least one
+    trade) and valid_worst_day (min daily return)."""
     if top < 1:
         raise LabError("--top must be >= 1")
     s = _setup(pocket, market)
@@ -723,29 +733,52 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     (t0, _), (v0, v1) = s.periods.train, s.periods.valid
     _refuse_opened_overlap(pocket, market, t0, v1, "validate")
     panel = _panel(s, v1)
-    cal = panel.close.index
+    daytrade = pocket == "daytrade"
+    cal = s.calendar if daytrade else panel.close.index
     elig = _eligible(s, panel, "paper")
     cm = _cost_model(s.market, panel.meta)
     cpk = _currency_per_krw(s.market, s.synced)
+    syms = _minute_universe(market) if daytrade else []
+    session = _session_rules(s.market) if daytrade else None
     capital = s.lab.capital["paper"]
     segments = period_segments(v0, v1, n=VALID_SEGMENTS)
-    bench = s.market.benchmark
+    bench = s.market.benchmark if s.pocket.benchmark_gate else None
     bench_ret = benchmark_return(market, bench, v0, v1) if bench else None
 
     metrics, returns = {}, {}
     for fam, params, rid, scr_r in zip(cands["family"], cands["params"], cands["rule_id"],
                                        cands["mean_net_r"]):
         rule = _rule(fams, fam, params, rid)
-        sig = rule.signals(panel, eligible=elig)  # history through the valid end
-        seg_sums = []
-        for a, b in segments:                     # params fixed; valid period only
-            trades = simulate(panel, sig, elig, a, b)
-            seg_sums.append(float(cm.net_returns(trades)["net_return"].sum()))
-        res = run_portfolio(simulate(panel, sig, elig, v0, v1), panel, cm, s.pocket, capital,
-                            cpk, False, entry_at=sig.entry_at, exit_at=sig.exit_at,
-                            equal_weight=sig.equal_weight)
-        eq = period_equity(res, cal, v0, v1, capital * cpk)
-        rets = eq.pct_change().dropna()
+        extra = {}
+        if daytrade:
+            parts = intraday_trades([rule], market, syms, v0, v1, panel, elig, cm, session)[0]
+            trades = pd.concat(parts[rid], ignore_index=True) if parts[rid] \
+                else pd.DataFrame(columns=TRADE_COLUMNS)
+            net = cm.net_returns(trades)
+            day = local_day(net["entry_date"])
+            seg_sums = [float(net["net_return"][(day >= pd.Timestamp(a))
+                                                & (day <= pd.Timestamp(b))].sum())
+                        for a, b in segments]
+            res = run_intraday_portfolio(trades, cm, s.pocket, capital, cpk, False)
+            eq = period_equity(res, cal, v0, v1, capital * cpk)
+            rets = pd.concat([pd.Series([capital * cpk], index=[eq.index[0] - pd.Timedelta(days=1)]),
+                              eq]).pct_change().dropna()
+            traded = rets[rets.index.isin(local_day(res.fills["entry_date"]))]
+            extra = {"valid_mean_daily_return": float(rets.mean()),
+                     "valid_positive_day_share":
+                         float((traded > 0).mean()) if len(traded) else math.nan,
+                     "valid_worst_day": float(rets.min())}
+        else:
+            sig = rule.signals(panel, eligible=elig)  # history through the valid end
+            seg_sums = []
+            for a, b in segments:                     # params fixed; valid period only
+                trades = simulate(panel, sig, elig, a, b)
+                seg_sums.append(float(cm.net_returns(trades)["net_return"].sum()))
+            res = run_portfolio(simulate(panel, sig, elig, v0, v1), panel, cm, s.pocket,
+                                capital, cpk, False, entry_at=sig.entry_at,
+                                exit_at=sig.exit_at, equal_weight=sig.equal_weight)
+            eq = period_equity(res, cal, v0, v1, capital * cpk)
+            rets = eq.pct_change().dropna()
         returns[rid] = rets
         metrics[rid] = {
             "family": fam, "params": params, "screen_mean_net_r": scr_r,
@@ -759,7 +792,7 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
             "valid_daily_sharpe": sharpe(rets.to_numpy(), periods_per_year=1),
             "valid_sharpe_annual": sharpe(rets.to_numpy()),
             "valid_mdd": max_drawdown(eq), "scenario": "paper", "capital_krw": capital,
-            "capital_ccy": capital * cpk, "currency": s.market.currency,
+            "capital_ccy": capital * cpk, "currency": s.market.currency, **extra,
         }
     pbo = _pbo(pd.DataFrame(returns).fillna(0.0))
     ranked = sorted((rid for rid in top_ids if metrics[rid]["valid_net_pnl"] > 0
@@ -776,9 +809,12 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
                  validate_run=rec.validate_runs)
         log.record(pocket, market, m["family"], rid, m["params"], "validate", _iso((v0, v1)),
                    {k: v for k, v in m.items() if k not in ("family", "params")})
-    table = pd.DataFrame([{"rule_id": rid, **{k: metrics[rid][k] for k in (
-        "valid_net_pnl", "valid_return", "valid_daily_sharpe", "valid_n_trades",
-        "valid_segments_positive", "recommended")}} for rid in top_ids])
+    cols = ["valid_net_pnl", "valid_return", "valid_daily_sharpe", "valid_n_trades",
+            "valid_segments_positive", "recommended"]
+    if daytrade:
+        cols += ["valid_mean_daily_return", "valid_positive_day_share", "valid_worst_day"]
+    table = pd.DataFrame([{"rule_id": rid, **{k: metrics[rid][k] for k in cols}}
+                          for rid in top_ids])
     table = table.sort_values("valid_daily_sharpe", ascending=False, na_position="last",
                               kind="stable").reset_index(drop=True)
     return ValidateResult(table, pbo, recommended, len(metrics), bench, bench_ret)

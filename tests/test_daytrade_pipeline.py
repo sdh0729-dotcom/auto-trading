@@ -134,10 +134,56 @@ def test_screen_intraday_refuses_a_period_reaching_the_seal(env):
                                    None, None, None, None, "daytrade", date(2023, 2, 1), cost_r_max=0.15)
 
 
-def test_validate_refuses_the_daytrade_pocket(env):
+def test_validate_daytrade_reports_daily_metrics(env):
     pipeline.screen("daytrade", "kr", "toy")
+    rec = pipeline.period_store.load_record(pipeline.periods_path("daytrade", "kr"))
+    res = pipeline.validate("daytrade", "kr", 3)
+    assert not res.table.empty
+    assert {"valid_mean_daily_return", "valid_positive_day_share", "valid_worst_day"} \
+        <= set(res.table.columns)
+    rows = ExperimentLog(pipeline.experiments_path()).rows("daytrade", "kr")
+    val = rows[rows["stage"] == "validate"]
+    assert len(val) == 1 and val.iloc[0]["period"] == [
+        rec.periods.valid[0].isoformat(), rec.periods.valid[1].isoformat()]
+    m = val.iloc[0]["metrics"]
+    assert m["valid_n_trades"] > 0 and m["validate_run"] == 1
+    assert {"valid_mean_daily_return", "valid_positive_day_share", "valid_worst_day"} <= set(m)
+    assert 0.0 <= m["valid_positive_day_share"] <= 1.0
+    assert m["valid_worst_day"] <= m["valid_mean_daily_return"]
+    assert len(m["valid_segment_net_sums"]) == pipeline.VALID_SEGMENTS
+    rec2 = pipeline.period_store.load_record(pipeline.periods_path("daytrade", "kr"))
+    assert rec2.validate_runs == 1
+
+
+def test_validate_never_loads_bars_after_valid_end(env, monkeypatch):
+    seen = []
+    real = screen_run.load_minutes
+
+    def spy(market, symbol, start, end, *a, **k):
+        seen.append(end)
+        return real(market, symbol, start, end, *a, **k)
+    monkeypatch.setattr(screen_run, "load_minutes", spy)
+    pipeline.screen("daytrade", "kr", "toy")
+    seen.clear()
+    pipeline.validate("daytrade", "kr", 3)
+    rec = pipeline.period_store.load_record(pipeline.periods_path("daytrade", "kr"))
+    assert seen and max(seen) <= rec.periods.valid[1] < rec.periods.sealed[0]
+
+
+def test_daytrade_has_no_benchmark_gate(env, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("daytrade must not consult the benchmark")
+    monkeypatch.setattr(pipeline, "benchmark_return", boom)
+    pipeline.screen("daytrade", "kr", "toy")
+    res = pipeline.validate("daytrade", "kr", 3)
+    assert res.benchmark is None and res.benchmark_return is None
+    pos = res.table[res.table["valid_net_pnl"] > 0]["rule_id"]
+    assert set(res.recommended) == set(pos)
+
+
+def test_daytrade_verify_final_still_refused(env):
     with pytest.raises(pipeline.LabError, match="daytrade"):
-        pipeline.validate("daytrade", "kr", 3)
+        pipeline.verify_final("daytrade", "kr", "x")
 
 
 def test_symbol_choice_reads_no_data_after_train_end(env, monkeypatch):

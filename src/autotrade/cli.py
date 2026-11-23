@@ -143,6 +143,9 @@ def validate(pocket: str = typer.Option("swing"),
                f"{pipeline.VALID_SEGMENTS}개 구간 중 순수익 > 0인 구간 수")
     typer.echo(f"PBO = {res.pbo:.3f} over {res.n_pool} candidates (all screened rules with "
                f">= {pipeline.MIN_TRAIN_TRADES} train trades; --top only limits the list above)")
+    if "valid_positive_day_share" in res.table.columns:
+        typer.echo("valid_positive_day_share = share of days with return > 0 among the days "
+                   "with at least one trade; valid_worst_day = worst daily return")
     if res.benchmark:
         typer.echo(f"benchmark {res.benchmark} buy-and-hold over the valid period: "
                    f"{res.benchmark_return:+.1%} (a rule needs valid_return above it)")

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.autotrade.daily-kr</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>__ROOT__/scripts/daily_kr.sh</string></array>
+  <key>StartInterval</key><integer>3600</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>__ROOT__/data/logs/launchd.log</string>
+  <key>StandardErrorPath</key><string>__ROOT__/data/logs/launchd.log</string>
+</dict>
+</plist>

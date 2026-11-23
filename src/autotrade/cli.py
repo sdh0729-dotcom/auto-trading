@@ -192,6 +192,45 @@ def report(pocket: str = typer.Option("swing"), market: str = typer.Option(..., 
     typer.echo(f"leaderboard: {pipeline.report(pocket, market)}")
 
 
+@app.command("forward-register")
+@_expected_errors
+def forward_register(pocket: str = typer.Option("swing"),
+                     market: str = typer.Option(..., help="kr | us")):
+    """Freeze the latest validate's recommended rules for a forward (paper) test from today."""
+    from autotrade import forward as fw
+    rec = fw.register(pocket, market)
+    typer.echo(f"forward test {pocket}/{market} from {rec['start']}: "
+               + ", ".join(r["rule_id"] for r in rec["rules"])
+               + f" | paper {rec['capital_krw']:,} KRW each, benchmark {rec['benchmark']}")
+
+
+@app.command()
+@_expected_errors
+def forward(pocket: str = typer.Option("swing"), market: str = typer.Option(..., help="kr | us")):
+    """Score the frozen forward-test rules on the days since registration."""
+    from autotrade import forward as fw
+    res = fw.run(pocket, market)
+    start = res.record["start"]
+    if res.last_date is None:
+        typer.echo(f"forward {pocket}/{market}: no trading day since {start} stored yet "
+                   f"(run `lab collect --market {market}`)")
+        return
+    bench = res.record.get("benchmark")
+    typer.echo(f"forward {pocket}/{market}: {start} ~ {res.last_date.date()} "
+               f"({len(next(iter(r['equity'] for r in res.rules)))} trading days)")
+    _show(pd.DataFrame([{
+        "rule_id": r["rule_id"], "return": f"{r['return']:+.2%}",
+        "vs_benchmark": f"{r['return'] - res.benchmark_return:+.2%}",
+        "closed_trades": r["n_closed"],
+        "holding": ", ".join(r["holdings"]["symbol"]) or "-"} for r in res.rules]))
+    typer.echo(f"benchmark {bench} buy-and-hold: {res.benchmark_return:+.2%}")
+    months = pd.DataFrame({r["rule_id"]: r["monthly"] for r in res.rules})
+    months[f"benchmark {bench}"] = res.benchmark_monthly
+    typer.echo("monthly returns:")
+    _show(months.map(lambda v: f"{v:+.2%}" if pd.notna(v) else "-").reset_index(
+        names="month").astype(str))
+
+
 @app.command()
 @_expected_errors
 def journal(memo: str = typer.Argument(..., help="note to append")):

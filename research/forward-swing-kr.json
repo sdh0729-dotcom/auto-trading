@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "pocket": "swing",
+  "market": "kr",
+  "start": "2026-11-24",
+  "registered_at": "2026-11-23T15:27:11+00:00",
+  "data_cutoff": "2026-11-20",
+  "valid": [
+    "2022-07-08",
+    "2024-09-05"
+  ],
+  "validate_run": 3,
+  "capital_krw": 5000000,
+  "scenario": "paper",
+  "benchmark": "069500",
+  "rules": [
+    {
+      "rule_id": "etf_rotation:8656c8b6",
+      "family": "etf_rotation",
+      "params": {
+        "lookback": 63,
+        "rebalance": 20,
+        "top_k": 3,
+        "k": 3.0
+      },
+      "valid_return": 0.3196512584988908
+    },
+    {
+      "rule_id": "etf_rotation:c0246197",
+      "family": "etf_rotation",
+      "params": {
+        "lookback": 63,
+        "rebalance": 20,
+        "top_k": 1,
+        "k": 3.0
+      },
+      "valid_return": 0.32772797060999886
+    },
+    {
+      "rule_id": "etf_rotation:f04c8cb9",
+      "family": "etf_rotation",
+      "params": {
+        "lookback": 252,
+        "rebalance": 20,
+        "top_k": 2,
+        "k": 3.0
+      },
+      "valid_return": 0.28906808427569475
+    }
+  ]
+}

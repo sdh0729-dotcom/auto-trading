@@ -195,3 +195,59 @@ def test_repeated_mismatch_raises_instead_of_looping(monkeypatch):
     c = FakeMinuteClient(n_days=3)
     with pytest.raises(cm.PriceScaleError):
         cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), TODAY)
+
+
+def _spy_saves(monkeypatch):
+    calls = []
+    real = cm.save_minutes
+
+    def spy(market, symbol, df):
+        calls.append(len(df))
+        return real(market, symbol, df)
+
+    monkeypatch.setattr(cm, "save_minutes", spy)
+    return calls
+
+
+def test_backward_saves_in_batches(monkeypatch):
+    c = FakeMinuteClient(n_days=31)          # 12,090 bars = 61 pages of 200
+    calls = _spy_saves(monkeypatch)
+    rep = cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), TODAY + pd.Timedelta(days=60))
+    assert rep.complete
+    assert len(calls) <= -(-c.pages // cm.FLUSH_PAGES) + 1 and len(calls) < 10
+    assert list(_stored(c).index) == _full_ts(c)
+    assert rep.added == sum(calls) == len(_full_ts(c))
+
+
+def test_abort_flushes_buffered_pages():
+    c = FakeMinuteClient(n_days=31, fail_after=30)
+    today = TODAY + pd.Timedelta(days=60)
+    with pytest.raises(RuntimeError):
+        cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), today)
+    assert not (minute_dir("kr", "A") / "_complete").exists()
+    got = _stored(c)
+    assert len(got) == 30 * 200 - 29      # pages overlap by one bar
+    assert list(got.index) == _full_ts(c)[-(30 * 200 - 29):]          # contiguous, no hole
+    c.fail_after = None
+    rep = cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), today)
+    assert rep.complete and (minute_dir("kr", "A") / "_complete").exists()
+    assert list(_stored(c).index) == _full_ts(c)
+
+
+class SplitAfterClient(FakeMinuteClient):
+    """Prices halve (a split) once `split_after` pages have been served."""
+
+    split_after = 3
+
+    def get_candles(self, *a, **k):
+        self.split = 2.0 if self.pages >= self.split_after else None
+        return super().get_candles(*a, **k)
+
+
+def test_mismatch_detected_inside_a_buffer():
+    c = SplitAfterClient(n_days=3)           # 1,170 bars = 6 pages; split shows on page 4
+    rep = cm.collect_minutes(c, "kr", "A", date(2024, 1, 2), TODAY)
+    df = _stored(c)
+    assert rep.complete and list(df.index) == _full_ts(c)
+    assert rep.added == len(df) == 3 * BARS_PER_DAY
+    assert df["open"].max() < 100.0                           # a single (post-split) scale

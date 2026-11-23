@@ -3,7 +3,8 @@
 Timestamps are bar END times in the market tz. Bars of the market's current session date are
 never stored. A symbol is collected in two parts: a forward part (now back to the latest
 stored bar; saved once complete, so the stored range never has a gap) and a backward part
-(earliest stored bar back to `since`; saved page by page, so an abort resumes without a gap).
+(earliest stored bar back to `since`; saved every FLUSH_PAGES pages and on any abort, so a
+resume has no gap).
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ log = logging.getLogger(__name__)
 
 COMPLETE_MARKER = "_complete"
 PAGE = 200
+FLUSH_PAGES = 25       # backward pages buffered per save (about 5,000 bars)
 
 
 class PriceScaleError(Exception):
@@ -52,12 +54,17 @@ def _local_dates(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(idx.tz_localize(None).normalize())
 
 
-def _same_scale(market: Market, symbol: str, new: pd.DataFrame, hi: pd.Timestamp) -> bool:
-    """True unless the stored bars on timestamps shared with `new` carry other prices."""
+def _same_scale(market: Market, symbol: str, new: pd.DataFrame, hi: pd.Timestamp,
+                held: list[pd.DataFrame] | None = None) -> bool:
+    """True unless the stored bars (plus not yet saved `held` pages) on timestamps shared
+    with `new` carry other prices."""
     if new.empty:
         return True
     stored = load_minutes(market, symbol, new.index.min().date(), hi.date(),
                           regular_only=False)
+    if held:
+        stored = pd.concat([*held, stored])
+        stored = stored[~stored.index.duplicated(keep="first")]
     common = stored.index.intersection(new.index)
     if len(common) == 0:
         return True
@@ -129,29 +136,51 @@ def collect_minutes(client: TossClient, market: Market, symbol: str, since: date
     before = bounds[0].to_pydatetime() if bounds is not None else None
     lo = bounds[0] if bounds is not None else None
     complete = False
-    for bars, next_before in _pages(client, market, symbol, before):
-        if bars.empty:
-            complete = True
-            break
-        if lo is not None and not _same_scale(market, symbol, bars[bars.index >= lo], lo):
-            log.warning("%s %s: older minute prices do not match the stored scale; "
-                        "refetching from scratch", market, symbol)
-            if _refetched:
-                raise PriceScaleError(f"{market} {symbol}: minute prices changed scale "
-                                      "again right after a refetch")
-            _wipe(market, symbol)       # nothing stored before the wipe counts as added
-            return collect_minutes(client, market, symbol, since, today, _refetched=True)
-        keep = bars[(_local_dates(bars.index) < today_ts)
-                    & (_local_dates(bars.index) >= since_ts)]
-        if lo is not None:
-            keep = keep[keep.index < lo]
-        if len(keep):
-            save_minutes(market, symbol, keep)
-            added += len(keep)
-            lo = keep.index.min() if lo is None else min(lo, keep.index.min())
-        if _local_dates(bars.index).min() < since_ts or next_before is None:
-            complete = True
-            break
+    buf: list[pd.DataFrame] = []      # contiguous with the earliest stored bar, newest first
+
+    def flush() -> None:
+        nonlocal added
+        if buf:
+            out = pd.concat(buf).sort_index()
+            buf.clear()
+            save_minutes(market, symbol, out)
+            added += len(out)
+
+    mismatch = False
+    try:
+        for bars, next_before in _pages(client, market, symbol, before):
+            if bars.empty:
+                complete = True
+                break
+            if lo is not None and not _same_scale(
+                    market, symbol, bars[bars.index >= lo], lo, buf):
+                mismatch = True
+                break
+            keep = bars[(_local_dates(bars.index) < today_ts)
+                        & (_local_dates(bars.index) >= since_ts)]
+            if lo is not None:
+                keep = keep[keep.index < lo]
+            if len(keep):
+                buf.append(keep)
+                lo = keep.index.min() if lo is None else min(lo, keep.index.min())
+                if len(buf) >= FLUSH_PAGES:
+                    flush()
+            if _local_dates(bars.index).min() < since_ts or next_before is None:
+                complete = True
+                break
+    except BaseException:
+        flush()                       # an abort loses no fetched page
+        raise
+    if mismatch:
+        buf.clear()                   # never store pages of the old scale
+        log.warning("%s %s: older minute prices do not match the stored scale; "
+                    "refetching from scratch", market, symbol)
+        if _refetched:
+            raise PriceScaleError(f"{market} {symbol}: minute prices changed scale "
+                                  "again right after a refetch")
+        _wipe(market, symbol)         # nothing stored before the wipe counts as added
+        return collect_minutes(client, market, symbol, since, today, _refetched=True)
+    flush()
     if complete:
         d.mkdir(parents=True, exist_ok=True)
         marker.write_text("", encoding="utf-8")

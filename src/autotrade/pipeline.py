@@ -68,6 +68,7 @@ MARKETS = ("kr", "us")
 SCENARIOS = ("paper", "real")
 VALID_SEGMENTS = 4               # "검증 기간 구간 안정성": valid cut into 4 test segments
 PBO_SPLITS = (16, 8, 4, 2)
+FEATURE_WARMUP_DAYS = 30         # calendar days of minute bars before valid for rolling features
 MAX_COMMISSION = 0.01            # a commission ratio >= 1% is almost surely a percent typo
 PARITY_MISMATCHES_KEPT = 20
 FAMILIES = {"swing": SWING_FAMILIES, "daytrade": DAYTRADE_FAMILIES}
@@ -745,14 +746,23 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     bench = s.market.benchmark if s.pocket.benchmark_gate else None
     bench_ret = benchmark_return(market, bench, v0, v1) if bench else None
 
+    fam_trades: dict[str, list] = {}       # rule_id -> trade frames (daytrade: one pass per family)
+    if daytrade:
+        fstart = max((pd.Timestamp(v0) - pd.Timedelta(days=FEATURE_WARMUP_DAYS)),
+                     s.calendar[0]).date()   # train-period bars only, never the sealed ones
+        for fam in dict.fromkeys(cands["family"]):
+            grid = [_rule(fams, f, p, r) for f, p, r in zip(cands["family"], cands["params"],
+                                                            cands["rule_id"]) if f == fam]
+            fam_trades.update(intraday_trades(grid, market, syms, v0, v1, panel, elig, cm,
+                                              session, features_start=fstart)[0])
     metrics, returns = {}, {}
     for fam, params, rid, scr_r in zip(cands["family"], cands["params"], cands["rule_id"],
                                        cands["mean_net_r"]):
         rule = _rule(fams, fam, params, rid)
         extra = {}
         if daytrade:
-            parts = intraday_trades([rule], market, syms, v0, v1, panel, elig, cm, session)[0]
-            trades = pd.concat(parts[rid], ignore_index=True) if parts[rid] \
+            parts = fam_trades[rid]
+            trades = pd.concat(parts, ignore_index=True) if parts \
                 else pd.DataFrame(columns=TRADE_COLUMNS)
             net = cm.net_returns(trades)
             day = local_day(net["entry_date"])

@@ -80,16 +80,20 @@ def _stack_features(per_symbol: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 def intraday_trades(grid: list, market: str, symbols: list[str], start: date, end: date,
                     daily: Panel, eligible: pd.DataFrame, cost_model: CostModel,
-                    rules: SessionRules) -> tuple[dict, dict]:
+                    rules: SessionRules, features_start: date | None = None
+                    ) -> tuple[dict, dict]:
     """Executed same-day trades of every rule in `grid` (one family) over [start, end]:
     -> ({rule_id: [trade frames]}, {rule_id: ([round-trip cost pct per candidate],
     [stop_pct per candidate])}). Minute bars are loaded per symbol only through `end`; the
+    day features read them from `features_start` (default `start`; an earlier date is the
+    warm-up of rolling features) while selection and candidates stay within [start, end]; the
     shared core of the screen (train) and validate (valid) trade generation."""
     t0, t1 = pd.Timestamp(start), pd.Timestamp(end)
     elig = eligible.loc[(eligible.index >= t0) & (eligible.index <= t1)]
     feats = pd.DataFrame(index=pd.MultiIndex.from_arrays([[], []], names=["day", "symbol"]))
     if type(grid[0]).needs_features():
-        per = {s: grid[0].day_features(s, load_minutes(market, s, start, end))
+        fstart = start if features_start is None else min(features_start, start)
+        per = {s: grid[0].day_features(s, load_minutes(market, s, fstart, end))
                for s in symbols}
         feats = _stack_features(per)
     picked = {}

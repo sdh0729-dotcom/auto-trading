@@ -208,3 +208,73 @@ def test_cost_r_max_comes_from_the_lab_criteria(env, monkeypatch):
     log = ExperimentLog(pipeline.experiments_path())
     assert log.n_trials("daytrade", "kr") == 2      # the skipped precheck point counts too
     assert not hasattr(screen_run, "PRECHECK_COST_R")
+
+
+class Roll(Toy):
+    """Toy trade on days whose 14-day rolling feature exists (like orb_sip / kr_open_rev)."""
+    family = "roll"
+
+    @classmethod
+    def grid(cls):
+        return [{"stop": 0.02}, {"stop": 0.03}]
+
+    def day_features(self, symbol, bars):
+        v = bars["volume"].groupby(bars.index.tz_localize(None).normalize()).sum()
+        v.index.name = "day"
+        return pd.DataFrame({"m": v.rolling(14, min_periods=14).mean().shift(1)})
+
+    def select(self, day_features, daily, eligible):
+        stacked = eligible.stack()
+        elig = stacked[stacked.astype(bool)].index.set_names(["day", "symbol"])
+        f = day_features.reindex(elig)
+        return f.index[f["m"].notna().to_numpy()]
+
+
+def _valid_setup(env):
+    pipeline.screen("daytrade", "kr", "toy")
+    s = pipeline._setup("daytrade", "kr")
+    v0, v1 = s.periods.valid
+    panel = pipeline._panel(s, v1)
+    return (s, v0, v1, panel, pipeline._eligible(s, panel, "paper"),
+            pipeline._cost_model(s.market, panel.meta), pipeline._session_rules(s.market))
+
+
+def test_validate_features_warm_up_before_the_valid_start(env, monkeypatch):
+    monkeypatch.setitem(DAYTRADE_FAMILIES, "roll", Roll)
+    s, v0, v1, panel, elig, cm, sess = _valid_setup(env)
+    grid = [Roll(p) for p in Roll.grid()]
+    syms = pipeline._minute_universe("kr")
+    cold = screen_run.intraday_trades(grid, "kr", syms, v0, v1, panel, elig, cm, sess)[0]
+    assert all(not parts for parts in cold.values())      # no feature in the first 14 days
+    warm = screen_run.intraday_trades(grid, "kr", syms, v0, v1, panel, elig, cm, sess,
+                                      features_start=(pd.Timestamp(v0) - pd.Timedelta(days=30)).date())[0]
+    first = pd.concat(warm[grid[0].rule_id])
+    assert pd.Timestamp(first["entry_date"].min()).tz_localize(None).normalize() == pd.Timestamp(v0)
+    assert pd.Timestamp(first["entry_date"].min()).tz_localize(None).normalize() >= pd.Timestamp(v0)
+
+
+def test_validate_loads_minutes_once_per_family_pass_and_matches_per_rule(env, monkeypatch):
+    s, v0, v1, panel, elig, cm, sess = _valid_setup(env)
+    syms = pipeline._minute_universe("kr")
+    grid = [Toy({"stop": 0.02}), Toy({"stop": 0.03})]
+    one = [screen_run.intraday_trades([r], "kr", syms, v0, v1, panel, elig, cm, sess)[0]
+           for r in grid]
+    calls = []
+    real = screen_run.load_minutes
+    monkeypatch.setattr(screen_run, "load_minutes",
+                        lambda m, sym, a, b, *x, **k: (calls.append(sym), real(m, sym, a, b, *x, **k))[1])
+    both = screen_run.intraday_trades(grid, "kr", syms, v0, v1, panel, elig, cm, sess)[0]
+    assert len(calls) == len(set(calls))                  # once per symbol, not per rule
+    for r, solo in zip(grid, one):
+        a, b = pd.concat(solo[r.rule_id]), pd.concat(both[r.rule_id])
+        pd.testing.assert_frame_equal(a.reset_index(drop=True), b.reset_index(drop=True))
+
+
+def test_validate_runs_one_minute_pass_per_family(env, monkeypatch):
+    pipeline.screen("daytrade", "kr", "toy")
+    calls = []
+    real = screen_run.load_minutes
+    monkeypatch.setattr(screen_run, "load_minutes",
+                        lambda m, sym, a, b, *x, **k: (calls.append(sym), real(m, sym, a, b, *x, **k))[1])
+    pipeline.validate("daytrade", "kr", 3)
+    assert max(calls.count(sym) for sym in set(calls)) == 1   # toy has no features: 1 load

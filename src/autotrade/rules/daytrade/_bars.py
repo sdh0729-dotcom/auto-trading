@@ -45,3 +45,20 @@ def _continuous_end(session) -> pd.Timestamp:
 def _last_at_or_before(dbars: pd.DataFrame, ts: pd.Timestamp):
     sub = dbars[dbars.index <= ts]
     return sub.iloc[-1:] if len(sub) else None
+
+
+def _first_minutes(dbars: pd.DataFrame, open_ts: pd.Timestamp, minutes: int):
+    """The bars ending in (open, open + minutes] when ALL `minutes` of them exist, else None:
+    an incomplete window (data hole) has no first-minutes volume, never a partial sum."""
+    w = dbars[(dbars.index > open_ts) & (dbars.index <= open_ts + pd.Timedelta(minutes=minutes))]
+    return w if len(w) == minutes else None
+
+
+def _prior_valid_mean(s: pd.Series, window: int) -> pd.Series:
+    """Per row: mean of the `window` previous VALID (non-NaN) values, excluding the row itself.
+    NaN rows get NaN and are skipped by later rows (a late open or a data hole does not blank
+    the next `window` days); fewer than `window` prior values -> NaN; a zero mean -> NaN (so a
+    relative-volume ratio or a multiple-of-average filter can never pass on it)."""
+    v = s.dropna()
+    m = v.shift(1).rolling(window, min_periods=window).mean()
+    return m.where(m > 0).reindex(s.index)

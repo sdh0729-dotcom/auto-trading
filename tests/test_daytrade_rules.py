@@ -431,3 +431,84 @@ def test_orb_and_gap_windows_start_at_the_kr_new_year_open():
     assert len(c) == 1 and c.iloc[0]["signal_ts"] == pd.Timestamp("2025-01-02 10:06", tz=KR_TZ)
     g = GapGo({"gap": 0.04, "confirm": 5}).candidates("005930", bars, days, panel)
     assert len(g) == 1 and g.iloc[0]["signal_ts"] == pd.Timestamp("2025-01-02 10:05", tz=KR_TZ)
+
+
+# ---- first-minutes volume features: late opens, incomplete windows, zero averages ----
+
+def _kr_session_bars(start, end, vol=lambda d: 60.0, drop=lambda d, ends: ends[:0]):
+    """KR bars for every KRX session in [start, end], from each day's ACTUAL open to its
+    close, volume `vol(day)` per minute; `drop(day, ends)` removes bars (data holes)."""
+    from autotrade.data.sessions import sessions
+    frames = []
+    for d, s in sessions("kr", start, end).iterrows():
+        ends = pd.date_range(s["open"] + pd.Timedelta(minutes=1), s["close"], freq="min")
+        ends = ends.difference(drop(d, ends))
+        frames.append(pd.DataFrame({"open": 100.0, "high": 100.5, "low": 99.5, "close": 100.2,
+                                    "volume": vol(d)}, index=pd.DatetimeIndex(ends, name="ts")))
+    return pd.concat(frames)
+
+
+def test_orb_sip_late_open_day_keeps_the_14_day_mean():
+    d = pd.Timestamp("2025-01-02")                  # KRX opens 10:00
+    bars = _kr_session_bars("2024-11-01", "2025-02-28")
+    f = OrbStocksInPlay({"stop_atr": 0.5, "or_minutes": 5}).day_features("005930", bars)
+    assert f.loc[d, "v5"] == pytest.approx(300.0) and bool(f.loc[d, "up5"])
+    assert f["mean_v5"].iloc[14:].notna().all()     # no 14-day blank after the late open
+    assert f["mean_v5"].iloc[:14].isna().all()
+
+
+def test_orb_sip_incomplete_range_is_nan_and_skipped_by_the_mean():
+    hole = pd.Timestamp("2024-12-02")               # first 3 bars missing (data hole):
+    vol = lambda d: 120.0 if d < hole else 60.0     # noqa: E731   only open+4, open+5 exist
+    bars = _kr_session_bars("2024-11-01", "2025-01-31", vol=vol,
+                            drop=lambda d, e: e[e <= e[0] + pd.Timedelta(minutes=2)]
+                            if d == hole else e[:0])
+    f = OrbStocksInPlay({"stop_atr": 0.5, "or_minutes": 5}).day_features("005930", bars)
+    assert np.isnan(f.loc[hole, "v5"]) and np.isnan(f.loc[hole, "rel_vol"])  # not a partial sum
+    after = f.index[f.index > hole]
+    assert f.loc[after, "mean_v5"].notna().all()    # the hole does not blank 14 days
+    # day after the hole: mean of the 14 prior VALID days (all before the hole) = 5 x 120
+    assert f.loc[after[0], "mean_v5"] == pytest.approx(600.0)
+    valid = f["v5"].dropna()
+    d = after[20]
+    prior = valid[valid.index < d].iloc[-14:]       # excludes day d itself
+    assert f.loc[d, "mean_v5"] == pytest.approx(prior.mean())
+
+
+def test_orb_sip_zero_mean_volume_never_passes():
+    first = pd.Timestamp("2024-12-02")
+    bars = _kr_session_bars("2024-11-01", "2024-12-31",
+                            vol=lambda d: 0.0 if d < first else 50.0)
+    f = OrbStocksInPlay({"stop_atr": 0.5, "or_minutes": 5}).day_features("005930", bars)
+    assert np.isnan(f.loc[first, "mean_v5"]) and np.isnan(f.loc[first, "rel_vol"])
+    assert not (f["rel_vol"] == np.inf).any()
+
+
+def test_kr_open_rev_late_open_and_incomplete_windows():
+    from autotrade.rules.daytrade.gap import OpenReversal
+    rule = OpenReversal({"drop": 0.03, "hold": 60, "stop_pct": 0.02})
+    hole = pd.Timestamp("2024-12-02")               # bar ending open + 30 missing
+    bars = _kr_session_bars("2024-11-01", "2025-02-28",
+                            drop=lambda d, e: e[(e > e[0] + pd.Timedelta(minutes=20))
+                                                & (e <= e[0] + pd.Timedelta(minutes=29))]
+                            if d == hole else e[:0])
+    f = rule.day_features("005930", bars)
+    assert np.isnan(f.loc[hole, "vol30"])
+    assert f.loc[pd.Timestamp("2025-01-02"), "vol30"] == pytest.approx(30 * 60.0)  # 10:01-10:30
+    assert np.isnan(f.loc[hole, "avg14"])           # no average on a day without vol30
+    assert f["avg14"].iloc[14:].drop(hole).notna().all()   # neither blanks the next 14 days
+    assert f.loc[f.index > hole, "avg14"].eq(30 * 60.0).all()
+
+
+def test_kr_open_rev_zero_average_never_passes_the_volume_filter():
+    from autotrade.rules.daytrade.gap import OpenReversal
+    rule = OpenReversal({"drop": 0.03, "hold": 60, "stop_pct": 0.02})
+    first = pd.Timestamp("2024-12-02")
+    bars = _kr_session_bars("2024-11-01", "2024-12-31",
+                            vol=lambda d: 0.0 if d < first else 50.0)
+    f = rule.day_features("005930", bars)
+    assert np.isnan(f.loc[first, "avg14"])
+    stacked = pd.concat({"005930": f}, names=["symbol"]).swaplevel().sort_index()
+    panel = _special_panel(["005930"], first)
+    elig = pd.DataFrame(True, index=panel.close.index, columns=["005930"])
+    assert first not in {d for d, _ in rule.select(stacked, panel, elig)}

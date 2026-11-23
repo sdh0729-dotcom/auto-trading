@@ -7,8 +7,9 @@ breakout signal is a LATER bar whose high exceeds the range high (strictly). The
 enters at the next bar's open.
 
 Entry proxy for stops: the RANGE HIGH (the breakout level); `stop_pct = distance / range_high`.
-Daily-derived inputs for day d (ATR14, prior close, 14-day volume mean) use rows strictly
-before d (shift 1).
+Daily-derived inputs for day d (ATR14, prior close) use rows strictly before d (shift 1).
+First-5-minute volume `v5` exists only when all 5 bars of (open, open + 5] do (else NaN);
+`mean_v5` is the mean of the 14 previous days WITH a v5 (excluding d), NaN when it is 0.
 
 Market: a rule's params must not carry it (rule_id hashes params), so it is inferred from the
 bars' timezone (`autotrade.types.TZ`); `day_features` records it in a `market` column so
@@ -21,7 +22,8 @@ import pandas as pd
 
 from autotrade.config import load_market_raw
 from autotrade.rules.daytrade.base import DAY_SYMBOL, IntradayRule, candidate_frame, empty_candidates
-from autotrade.rules.daytrade._bars import _market_of, _session_days
+from autotrade.rules.daytrade._bars import (_first_minutes, _market_of, _prior_valid_mean,
+                                           _session_days)
 from autotrade.rules.indicators import atr
 from autotrade.types import Panel
 
@@ -78,15 +80,16 @@ class OrbStocksInPlay(IntradayRule):
         market = _market_of(bars)
         days, rows = [], []
         for d, db, sess in _session_days(bars):
-            o = sess["open"]
-            rng = db[(db.index > o) & (db.index <= o + pd.Timedelta(minutes=FIRST_MINUTES))]
-            full = (o + pd.Timedelta(minutes=FIRST_MINUTES)) in db.index
-            up = bool(full and rng["close"].iloc[-1] > rng["open"].iloc[0])
+            rng = _first_minutes(db, sess["open"], FIRST_MINUTES)
             days.append(d)
-            rows.append((float(rng["volume"].sum()) if len(rng) else np.nan, up))
+            if rng is None:                  # incomplete first 5 minutes: no v5, not up
+                rows.append((np.nan, False))
+            else:
+                rows.append((float(rng["volume"].sum()),
+                             bool(rng["close"].iloc[-1] > rng["open"].iloc[0])))
         out = pd.DataFrame(rows, index=pd.DatetimeIndex(days, name="day"),
                            columns=["v5", "up5"])
-        out["mean_v5"] = out["v5"].rolling(RV_WINDOW, min_periods=RV_WINDOW).mean().shift(1)
+        out["mean_v5"] = _prior_valid_mean(out["v5"], RV_WINDOW)
         out["rel_vol"] = out["v5"] / out["mean_v5"]
         out["market"] = market
         return out[cols]

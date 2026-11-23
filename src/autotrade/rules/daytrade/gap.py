@@ -10,8 +10,9 @@ Lab choices (not in the spec): confidence = min(1, gap / 0.08) for the gap famil
 min(1, |drop| / 0.10) for `kr_open_rev`; `gap_go` stop = (signal close - lowest low from the
 open through the signal bar) / signal close (day skipped if <= 0); `gap_fade` target =
 actual gap / 2 (fill half the gap). `kr_open_rev`: first-30-minute drop = prev close -> close of
-the bar ending open + 30 min; volume filter compares the first-30-minute volume with the mean of
-that symbol's first-30-minute volumes on the 14 PRIOR days with data (computed in
+the bar ending open + 30 min; volume filter compares the first-30-minute volume (NaN unless all
+30 bars after the day's actual open exist) with the mean of that symbol's first-30-minute
+volumes on the 14 PRIOR days that have one (NaN when that mean is 0; computed in
 `day_features`, filtered in `select`); exit_ts = signal_ts + `hold` minutes. KR only; the market
 is inferred from the bars' timezone.
 """
@@ -20,7 +21,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from autotrade.rules.daytrade._bars import _last_at_or_before, _market_of, _session_days
+from autotrade.rules.daytrade._bars import (_first_minutes, _last_at_or_before, _market_of,
+                                           _prior_valid_mean, _session_days)
 from autotrade.rules.daytrade.base import DAY_SYMBOL, IntradayRule, candidate_frame, empty_candidates
 from autotrade.types import Panel
 
@@ -136,12 +138,11 @@ class OpenReversal(IntradayRule):
         market = _market_of(bars)
         days, vols = [], []
         for d, db, sess in _session_days(bars):
-            o = sess["open"]
-            first = db[(db.index > o) & (db.index <= o + pd.Timedelta(minutes=FIRST_MINUTES))]
+            first = _first_minutes(db, sess["open"], FIRST_MINUTES)
             days.append(d)
-            vols.append(float(first["volume"].sum()) if len(first) else np.nan)
+            vols.append(float(first["volume"].sum()) if first is not None else np.nan)
         vol = pd.Series(vols, index=pd.DatetimeIndex(days, name="day"))
-        avg = vol.shift(1).rolling(VOL_WINDOW, min_periods=VOL_WINDOW).mean()
+        avg = _prior_valid_mean(vol, VOL_WINDOW)
         return pd.DataFrame({"market": market, "vol30": vol, "avg14": avg})
 
     def select(self, day_features, daily, eligible):

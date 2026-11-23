@@ -6,7 +6,7 @@ import pytest
 
 from autotrade.config import (ConfigError, load_lab, load_market, load_market_raw,
                                load_pocket, load_synced)
-from autotrade.types import TRADE_COLUMNS, Panel
+from autotrade.types import TRADE_COLUMNS, Panel, VIConfig
 
 
 @pytest.fixture
@@ -28,6 +28,7 @@ def test_kr_market_values(synced):
     assert m.always_include == ["069500", "102110"]
     assert m.commission_rate == 0.00015
     assert m.fractional_orders is False
+    assert m.vi == VIConfig(0.10, 0.03, 0.06, 2, True)
 
 
 def test_us_market_values(synced):
@@ -38,6 +39,7 @@ def test_us_market_values(synced):
     assert m.always_include == ["SPY", "QQQ"]
     assert m.sell_tax_rate == {"stock": 0.0, "etf": 0.0}
     assert m.fractional_orders is True
+    assert m.vi is None
 
 
 def test_market_raw_has_no_commission_and_replace_works():

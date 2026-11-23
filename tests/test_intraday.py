@@ -2,7 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from autotrade.screen.intraday import CANDIDATE_COLUMNS, SessionRules, execute
+from autotrade.screen.intraday import (CANDIDATE_COLUMNS, SessionRules, VIConfig, execute,
+                                       vi_halts)
 from autotrade.types import EXIT_REASONS, TRADE_COLUMNS
 
 KR = "Asia/Seoul"
@@ -145,3 +146,104 @@ def test_multiple_days_and_edge_cases():
     bad["day"] = pd.Timestamp(d2)
     with pytest.raises(ValueError):
         execute("A", b, bad, KR_RULES)
+
+
+VI = VIConfig(static_pct=0.10, dynamic_pct_kospi200=0.03, dynamic_pct_other=0.06,
+              halt_minutes=2, etf_exempt=True)
+VI_RULES = SessionRules(last_entry="15:20", exit_lead_minutes=0, vi=VI)
+
+
+def test_exit_ts_at_session_exit_bar_is_session_end():
+    b = bars(D, [flat("09:01"), flat("09:02"), ("15:30", 100, 100, 100, 103)])
+    c = cand(D, "09:01", exit_ts=pd.Timestamp(f"{D} 15:30", tz=KR))
+    r = execute("A", b, cands(c), KR_RULES).iloc[0]
+    assert r.exit_reason == "session_end" and r.exit_price == 103
+
+
+def test_execute_many_days_matches_per_day():
+    days = ["2024-01-02", "2024-01-03", "2024-01-04"]
+    b = pd.concat([bars(d, [flat("09:01"), flat("09:02"), ("15:30", 100, 100, 100, 100 + i)])
+                   for i, d in enumerate(days)])
+    t = execute("A", b, cands(*[cand(d, "09:01") for d in days]), KR_RULES)
+    assert t.exit_price.tolist() == [100, 101, 102]
+
+
+def test_static_vi_halts_two_minutes():
+    b = bars(D, [flat("09:01"), ("09:02", 100, 111, 100, 110), flat("09:03", 110),
+                 flat("09:04", 110), flat("09:05", 110), flat("09:06", 110)])
+    h = vi_halts(b, 100.0, 0.50, VI)
+    assert h.index.equals(b.index)
+    # trigger bar 09:02 is not halted; (09:02, 09:04] is
+    assert h.tolist() == [False, False, True, True, False, False]
+
+
+def test_static_reference_resets_to_auction_end_price():
+    # after the auction the reference is the 09:05 open (110); +9% from it is no new trigger
+    b = bars(D, [flat("09:01"), ("09:02", 100, 111, 100, 110), flat("09:03", 110),
+                 flat("09:04", 110), ("09:05", 110, 119.9, 110, 119), flat("09:06", 119)])
+    assert vi_halts(b, 100.0, 0.50, VI).tolist() == [False, False, True, True, False, False]
+
+
+def test_dynamic_vi_uses_previous_close():
+    b = bars(D, [flat("09:01"), flat("09:02"), ("09:03", 100, 106, 100, 105),
+                 flat("09:04", 105), flat("09:05", 105), flat("09:06", 105)])
+    h = vi_halts(b, 100.0, 0.06, VI)
+    assert h.tolist() == [False, False, False, True, True, False]
+    # 5.9% from previous close is not enough
+    b2 = bars(D, [flat("09:01"), flat("09:02"), ("09:03", 100, 105.9, 100, 105),
+                  flat("09:04", 105)])
+    assert not vi_halts(b2, 100.0, 0.06, VI).any()
+
+
+def test_stop_inside_vi_fills_after_auction():
+    b = bars(D, [flat("09:01"), flat("09:02"), ("09:03", 100, 107, 100, 106),
+                 ("09:04", 100, 100, 90, 92),          # halted: stop 98 breached
+                 flat("09:05", 93), flat("09:06", 94), flat("15:30", 94)])
+    t = execute("A", b, cands(cand(D, "09:01", stop=0.02)), VI_RULES, prev_close=100.0)
+    r = t.iloc[0]
+    assert r.exit_reason == "stop" and r.exit_price == 94
+    assert r.exit_date == pd.Timestamp(f"{D} 09:06", tz=KR)
+
+
+def test_target_inside_vi_needs_open_at_target():
+    def mk(reopen):
+        return bars(D, [flat("09:01"), flat("09:02"), ("09:03", 100, 102.5, 100, 101),
+                        ("09:04", 100, 104, 100, 104),      # halted: target 103 touched
+                        flat("09:05", 101), ("09:06", reopen, reopen, reopen, reopen),
+                        flat("15:30", 102)])
+    c = cands(cand(D, "09:01", target=0.03))
+    kw = dict(prev_close=100.0, dynamic_pct=0.02)
+    t = execute("A", mk(101), c, VI_RULES, **kw)
+    assert t.iloc[0].exit_reason == "session_end"   # open 101 < target: keep walking
+    r = execute("A", mk(104), c, VI_RULES, **kw).iloc[0]
+    assert r.exit_reason == "target" and r.exit_price == 104
+    assert r.exit_date == pd.Timestamp(f"{D} 09:06", tz=KR)
+
+
+def test_entry_inside_vi_deferred_and_late_entry_dropped():
+    b = bars(D, [flat("09:01"), ("09:02", 100, 107, 100, 106), flat("09:03", 106),
+                 flat("09:04", 106), flat("09:05", 107), flat("15:30", 107)])
+    t = execute("A", b, cands(cand(D, "09:02")), VI_RULES, prev_close=100.0)
+    assert t.iloc[0].entry_date == pd.Timestamp(f"{D} 09:05", tz=KR)
+    assert t.iloc[0].entry_price == 107
+    late = bars(D, [flat("15:17"), ("15:18", 100, 107, 100, 106), flat("15:19", 106),
+                    flat("15:20", 106), flat("15:21", 106), flat("15:30", 106)])
+    assert execute("A", late, cands(cand(D, "15:18")), VI_RULES, prev_close=100.0).empty
+
+
+def test_etf_never_halts_and_no_vi_without_inputs():
+    b = bars(D, [flat("09:01"), flat("09:02"), ("09:03", 100, 107, 100, 106),
+                 ("09:04", 100, 100, 90, 92), flat("09:05", 93), flat("15:30", 94)])
+    c = cands(cand(D, "09:01", stop=0.02))
+    t4 = pd.Timestamp(f"{D} 09:04", tz=KR)
+    etf = execute("ETF", b, c, VI_RULES, prev_close=100.0, product="etf")
+    assert etf.iloc[0].exit_date == t4
+    for kw in ({}, {"prev_close": None}):
+        assert execute("A", b, c, VI_RULES, **kw).iloc[0].exit_date == t4
+    assert execute("A", b, c, KR_RULES, prev_close=100.0).iloc[0].exit_date == t4
+    # per-day series: a day missing from it has no VI
+    ser = pd.Series({pd.Timestamp("2024-01-03"): 100.0})
+    assert execute("A", b, c, VI_RULES, prev_close=ser).iloc[0].exit_date == t4
+    ser = pd.Series({pd.Timestamp(D): 100.0})
+    r = execute("A", b, c, VI_RULES, prev_close=ser).iloc[0]
+    assert r.exit_date == pd.Timestamp(f"{D} 15:30", tz=KR) and r.exit_price == 94

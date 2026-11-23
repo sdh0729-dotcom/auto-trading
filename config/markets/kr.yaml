@@ -18,3 +18,4 @@ fractional_orders: false
 # validate recommends a rule only if its valid-period return beats buying and holding this
 benchmark: "069500"    # KODEX 200
 minute_start: 2022-11-23
+vi: {static_pct: 0.10, dynamic_pct_kospi200: 0.03, dynamic_pct_other: 0.06, halt_minutes: 2, etf_exempt: true}

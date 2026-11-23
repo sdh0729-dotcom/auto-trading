@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from autotrade.types import Market, Pocket, Product
+from autotrade.types import Market, Pocket, Product, VIConfig
 
 
 class ConfigError(Exception):
@@ -93,6 +93,7 @@ class MarketConfig:
     # name keywords cannot catch leveraged/inverse ETFs without it)
     etf_leverage_required: bool = False
     minute_start: date | None = None  # first day of stored 1-minute history
+    vi: VIConfig | None = None        # KR volatility-interruption auctions
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,11 @@ def load_market_raw(m: Market) -> MarketConfig:
     if "tick_table" in d:
         d["tick_table"] = {p: [(float(u), float(t)) for u, t in rows]
                            for p, rows in d["tick_table"].items()}
+    if "vi" in d:
+        try:
+            d["vi"] = VIConfig(**d["vi"])
+        except TypeError as e:
+            raise ConfigError(f"invalid vi config {m}: {e}") from e
     try:
         return MarketConfig(**d)
     except TypeError as e:

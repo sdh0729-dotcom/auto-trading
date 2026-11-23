@@ -20,6 +20,16 @@ META_COLUMNS = ["name", "security_type", "product", "is_common_share", "delisted
                 "leverage_factor", "english_name"]   # last two: ETFs from /api/v1/stocks
 
 
+@dataclass(frozen=True)
+class VIConfig:
+    """KR volatility-interruption (VI) auction parameters (fractions, not percents)."""
+    static_pct: float
+    dynamic_pct_kospi200: float
+    dynamic_pct_other: float
+    halt_minutes: int
+    etf_exempt: bool = True
+
+
 @dataclass
 class Panel:
     open: pd.DataFrame

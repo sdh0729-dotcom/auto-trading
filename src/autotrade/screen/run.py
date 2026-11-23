@@ -5,12 +5,15 @@ from __future__ import annotations
 import math
 from datetime import date
 
+import numpy as np
 import pandas as pd
 
 from autotrade.costs.model import CostModel
-from autotrade.rules.registry import SWING_FAMILIES
+from autotrade.data.minute_store import load_minutes
+from autotrade.rules.registry import DAYTRADE_FAMILIES, SWING_FAMILIES
+from autotrade.screen.intraday import SessionRules, execute
 from autotrade.screen.simulate import simulate
-from autotrade.types import Panel
+from autotrade.types import TRADE_COLUMNS, Panel
 from autotrade.validate.experiments import ExperimentLog
 from autotrade.validate.seal import SealViolation
 
@@ -62,4 +65,93 @@ def screen_family(family: str, panel: Panel, eligible: pd.DataFrame, start: date
         metrics = trade_metrics(cost_model.net_returns(trades))
         log.record(pocket, market, family, rule.rule_id, params, "screen", period, metrics)
         out.append({"rule_id": rule.rule_id, "params": params, **metrics})
+    return pd.DataFrame(out, columns=SCREEN_COLUMNS)
+
+
+# an intraday grid point whose round-trip cost exceeds this many stop-distances (R) is not
+# simulated: costs alone would eat the edge (spec: lab.criteria.cost_r_max)
+PRECHECK_COST_R = 0.15
+
+
+def _stack_features(per_symbol: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    frames = [f.assign(symbol=s).set_index("symbol", append=True)
+              for s, f in per_symbol.items() if len(f)]
+    if not frames:
+        return pd.DataFrame(index=pd.MultiIndex.from_arrays([[], []], names=["day", "symbol"]))
+    out = pd.concat(frames)
+    out.index = out.index.set_names(["day", "symbol"])
+    return out
+
+
+def screen_intraday(family: str, market: str, symbols: list[str], start: date, end: date,
+                    daily: Panel, eligible: pd.DataFrame, cost_model: CostModel,
+                    rules: SessionRules, log: ExperimentLog, pocket: str,
+                    sealed_start: date) -> pd.DataFrame:
+    """One row per grid params (as `screen_family`). Minute bars are loaded per symbol only
+    through `end`. Pass 1 builds the family's day features, then `select` picks the
+    symbol-days per grid point and every symbol's bars are loaded once more to build and
+    execute the candidates of all grid points. A grid point whose median round-trip cost
+    exceeds PRECHECK_COST_R of its median stop is logged as stage "precheck" and skipped."""
+    if pd.Timestamp(end) >= pd.Timestamp(sealed_start):
+        raise SealViolation(f"screen end {end} reaches sealed period starting {sealed_start}")
+    if pd.Timestamp(start) > pd.Timestamp(end):
+        raise ValueError(f"start {start} is after end {end}")
+    cls = DAYTRADE_FAMILIES[family]
+    grid = [cls(p) for p in cls.grid()]
+    t0, t1 = pd.Timestamp(start), pd.Timestamp(end)
+    period = (t0.date().isoformat(), t1.date().isoformat())
+    elig = eligible.loc[(eligible.index >= t0) & (eligible.index <= t1)]
+    feats = pd.DataFrame(index=pd.MultiIndex.from_arrays([[], []], names=["day", "symbol"]))
+    if cls.needs_features():
+        per = {s: grid[0].day_features(s, load_minutes(market, s, start, end))
+               for s in symbols}
+        feats = _stack_features(per)
+    picked = {}
+    for rule in grid:
+        sel = rule.select(feats, daily, elig)
+        picked[rule.rule_id] = pd.DataFrame(index=sel).reset_index().groupby("symbol")["day"] \
+            .apply(lambda d: pd.DatetimeIndex(sorted(set(d)))).to_dict() if len(sel) else {}
+    product = daily.meta["product"].to_dict() if "product" in daily.meta.columns else {}
+    trades = {r.rule_id: [] for r in grid}
+    cost = {r.rule_id: ([], []) for r in grid}        # (cost pct per candidate, stop_pct)
+    for sym in symbols:
+        if not any(sym in p for p in picked.values()):
+            continue
+        bars = load_minutes(market, sym, start, end)
+        if bars.empty:
+            continue
+        have = pd.DatetimeIndex(bars.index.tz_localize(None)
+                                .normalize().unique())
+        prev = (daily.close[sym].shift(1).dropna() if sym in daily.close.columns else None)
+        for rule in grid:
+            days = picked[rule.rule_id].get(sym)
+            if days is None:
+                continue
+            days = days[days.isin(have) & (days >= t0) & (days <= t1)]
+            if not len(days):
+                continue
+            cands = rule.candidates(sym, bars, days, daily)
+            if not len(cands):
+                continue
+            px = bars["close"].reindex(cands["signal_ts"]).to_numpy(float)
+            cost[rule.rule_id][0].extend(cost_model.round_trip_cost_pct(sym, p)
+                                         for p in px if np.isfinite(p) and p > 0)
+            cost[rule.rule_id][1].extend(cands["stop_pct"].astype(float))
+            tr = execute(sym, bars, cands, rules, prev_close=prev,
+                         product=product.get(sym, "stock"))
+            if len(tr):
+                trades[rule.rule_id].append(tr)
+    out = []
+    for rule in grid:
+        pcts, stops = cost[rule.rule_id]
+        cost_r = float(np.median(pcts) / np.median(stops)) if pcts and stops else math.nan
+        if cost_r > PRECHECK_COST_R:
+            log.record(pocket, market, family, rule.rule_id, rule.params, "precheck", period,
+                       {"cost_r": cost_r})
+            continue
+        parts = trades[rule.rule_id]
+        tr = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=TRADE_COLUMNS)
+        metrics = trade_metrics(cost_model.net_returns(tr))
+        log.record(pocket, market, family, rule.rule_id, rule.params, "screen", period, metrics)
+        out.append({"rule_id": rule.rule_id, "params": rule.params, **metrics})
     return pd.DataFrame(out, columns=SCREEN_COLUMNS)

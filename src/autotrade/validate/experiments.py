@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 Stage = Literal["screen", "validate", "final", "cycle_started"]
-STAGES = ("screen", "validate", "final", "cycle_started")
+STAGES = ("screen", "precheck", "validate", "final", "cycle_started")
 _FIELDS = ["ts", "pocket", "market", "family", "rule_id", "params", "stage", "period", "metrics"]
 
 

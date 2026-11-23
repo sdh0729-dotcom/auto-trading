@@ -37,14 +37,16 @@ from autotrade.data.collect import collect_daily, collect_meta, market_today
 from autotrade.data.collect_minute import collect_minutes, minute_symbols
 from autotrade.data.delisted_kr import (KindError, add_delisted_meta, kind_delisted,
                                         save_supplement_record, supplement_delisted_kr)
+from autotrade.data.minute_store import minute_calendar, minute_dir
 from autotrade.data.krx_overlay import refresh_overlays, save_overlay_record
 from autotrade.data.quality import check_daily, hard_issues
 from autotrade.data.store import (calendar, data_root, load_bars, load_daily, load_panel,
                                   save_meta, stored_symbols, trading_dates)
 from autotrade.report import (CONFIDENCE_FORMULAS, RuleCard, limitations, write_leaderboard,
                               write_rule_card)
-from autotrade.rules.registry import SWING_FAMILIES
-from autotrade.screen.run import MIN_TRAIN_TRADES, screen_family
+from autotrade.rules.registry import DAYTRADE_FAMILIES, SWING_FAMILIES
+from autotrade.screen.intraday import SessionRules
+from autotrade.screen.run import MIN_TRAIN_TRADES, screen_family, screen_intraday
 from autotrade.screen.simulate import simulate
 from autotrade.sizing import PortfolioResult, run_portfolio
 from autotrade.toss.client import TossApiError, make_client_from_env
@@ -66,7 +68,7 @@ VALID_SEGMENTS = 4               # "검증 기간 구간 안정성": valid cut i
 PBO_SPLITS = (16, 8, 4, 2)
 MAX_COMMISSION = 0.01            # a commission ratio >= 1% is almost surely a percent typo
 PARITY_MISMATCHES_KEPT = 20
-FAMILIES = {"swing": SWING_FAMILIES}
+FAMILIES = {"swing": SWING_FAMILIES, "daytrade": DAYTRADE_FAMILIES}
 VERDICT_PAPER, VERDICT_REAL = "② 모의 자격", "실돈 자격"
 # US real money: fractional-order limits (amount orders, exit 1 h before the close, no
 # server-side stop) are not modelled yet -> reference only until plan 2 (spec 5)
@@ -133,7 +135,8 @@ class Setup:
     synced: SyncedValues
     periods: Periods
     calendar: pd.DatetimeIndex   # stored trading dates from lab.swing_start to the data cutoff
-    record: PeriodRecord
+    record: PeriodRecord         # (daytrade: days with minute bars of the benchmark)
+    name: str = "swing"          # the pocket's name
 
 
 def _check_market(market: str) -> None:
@@ -146,6 +149,28 @@ def _families(pocket: str) -> dict:
         raise LabError(f"no rule families for pocket {pocket!r} yet "
                        f"(available: {', '.join(FAMILIES)})")
     return FAMILIES[pocket]
+
+
+def _swing_only(pocket: str, what: str) -> None:
+    if pocket != "swing":
+        raise LabError(f"`{what}` does not support the {pocket} pocket yet")
+
+
+def _pocket_dates(pocket: str, market: str, lab: LabConfig, end: date) -> pd.DatetimeIndex:
+    """Trading dates the period split runs on, through `end`: stored daily dates from
+    lab.swing_start (swing) or the minute calendar (daytrade; days with benchmark minute bars
+    from the market's minute_start)."""
+    if pocket == "daytrade":
+        cal = minute_calendar(market)
+        return cal[cal <= pd.Timestamp(end)]
+    return trading_dates(market, lab.swing_start, end)
+
+
+def _no_data(pocket: str, market: str) -> LabError:
+    if pocket == "daytrade":
+        return LabError(f"no minute data for {market}: run `lab collect-minute --market "
+                        f"{market}` first")
+    return LabError(f"no daily data for {market}: run `lab collect --market {market}` first")
 
 
 def _load_periods(pocket: str, market: str) -> PeriodRecord | None:
@@ -187,9 +212,9 @@ def _new_periods(pocket: str, market: str, lab: LabConfig) -> PeriodRecord:
     (a fresh split could move over an opened seal), else split from the stored dates. A
     rebuilt train / valid must equal the periods of the latest logged screen / validate."""
     tickets = SealRegistry(seal_path()).tickets(pocket, market)
-    cal = trading_dates(market, lab.swing_start, date.today())
+    cal = _pocket_dates(pocket, market, lab, date.today())
     if len(cal) == 0:
-        raise LabError(f"no daily data for {market}: run `lab collect --market {market}` first")
+        raise _no_data(pocket, market)
     if tickets:
         rows = ExperimentLog(experiments_path()).rows(pocket, market)
         logged = {st: _logged_period(rows, st) for st in ("screen", "validate")}
@@ -211,7 +236,8 @@ def _new_periods(pocket: str, market: str, lab: LabConfig) -> PeriodRecord:
     try:
         return period_store.new_record(pocket, market, cal, lab.split)
     except ValueError as e:
-        raise LabError(f"not enough daily data for {market} to split periods: {e}") from e
+        raise LabError(f"not enough {'minute' if pocket == 'daytrade' else 'daily'} data for "
+                       f"{market} to split periods: {e}") from e
 
 
 def _setup(pocket: str, market: str, create: bool = False) -> Setup:
@@ -229,10 +255,10 @@ def _setup(pocket: str, market: str, create: bool = False) -> Setup:
         rec = _new_periods(pocket, market, lab)
         _refuse_opened_overlap(pocket, market, *rec.periods.train, "screen")
         period_store.save_record(periods_path(pocket, market), rec)
-    cal = trading_dates(market, lab.swing_start, rec.data_cutoff)
+    cal = _pocket_dates(pocket, market, lab, rec.data_cutoff)
     if len(cal) == 0:
-        raise LabError(f"no daily data for {market}: run `lab collect --market {market}` first")
-    return Setup(mc, pc, lab, synced, rec.periods, cal, rec)
+        raise _no_data(pocket, market)
+    return Setup(mc, pc, lab, synced, rec.periods, cal, rec, pocket)
 
 
 def _refuse_opened_overlap(pocket: str, market: str, start: date, end: date,
@@ -253,7 +279,8 @@ def _panel(s: Setup, end: date) -> Panel:
     collected later never change what a screen / validate / verify run computes."""
     p = load_panel(s.market.market, None, s.lab.history_start, end)
     idx = p.close.index
-    if not idx[idx >= pd.Timestamp(s.lab.swing_start)].equals(
+    # the daytrade calendar is the minute one: only the swing calendar mirrors the daily bars
+    if s.name == "swing" and not idx[idx >= pd.Timestamp(s.lab.swing_start)].equals(
             s.calendar[s.calendar <= pd.Timestamp(end)]):
         raise LabError("stored data changed while running; re-run the command")
     if p.calendar is not None:
@@ -588,13 +615,40 @@ def screen(pocket: str, market: str, family: str = "all") -> pd.DataFrame:
     cm = _cost_model(s.market, panel.meta)
     log = ExperimentLog(experiments_path())
     frames = []
+    if pocket == "daytrade":
+        rules = _session_rules(s.market)
+        syms = _minute_universe(market)
+        for n in names:
+            df = screen_intraday(n, market, syms, t0, t1, panel, elig, cm, rules, log, pocket,
+                                 sealed_start=s.periods.sealed[0])
+            frames.append(df.assign(family=n))
+        return _screen_table(frames)
     for n in names:
         df = screen_family(n, panel, elig, t0, t1, cm, log, pocket, market,
                            sealed_start=s.periods.sealed[0])
         frames.append(df.assign(family=n))
+    return _screen_table(frames)
+
+
+def _screen_table(frames: list[pd.DataFrame]) -> pd.DataFrame:
     out = pd.concat(frames, ignore_index=True)
     return out.sort_values("mean_net_r", ascending=False, na_position="last",
                            kind="stable").reset_index(drop=True)
+
+
+def _session_rules(mc: MarketConfig) -> SessionRules:
+    """Paper-mode session rules: KR stops entering at the closing auction and has VI
+    auctions; US trades to the close. Exits run to the last bar (no early exit lead)."""
+    return SessionRules(last_entry=mc.closing_auction_start, exit_lead_minutes=0, vi=mc.vi)
+
+
+def _minute_universe(market: str) -> list[str]:
+    """Symbols that have stored minute data, in the collector's universe order."""
+    root = minute_dir(market, "x").parent
+    have = {p.name for p in root.iterdir() if p.is_dir()} if root.exists() else set()
+    mc = load_market_raw(market)
+    ordered = minute_symbols(market, mc.minute_start, date.today(), load_lab().universe_top_n)
+    return [s for s in ordered if s in have]
 
 
 # ---------------------------------------------------------------- validate
@@ -646,6 +700,7 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     recommend up to max_final_candidates of them with valid net_pnl > 0 and a valid return
     (net_pnl / capital) above the market benchmark's buy-and-hold return, by valid daily
     Sharpe. Every run increments the period file's validate_runs counter."""
+    _swing_only(pocket, "validate")
     if top < 1:
         raise LabError("--top must be >= 1")
     s = _setup(pocket, market)
@@ -853,6 +908,7 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
     period in NautilusTrader for both capital scenarios and write the rule card. Cycle 1 opens
     only a rule recommended by the latest `lab validate` run on the current valid period;
     later cycles only the previous cycle's final candidates."""
+    _swing_only(pocket, "verify --final")
     s = _setup(pocket, market)
     fams = _families(pocket)
     log = ExperimentLog(experiments_path())
@@ -934,6 +990,7 @@ def periods(pocket: str, market: str, new_cycle: bool = False) -> dict:
         raise LabError(f"no periods for {pocket}/{market}: run `lab screen` first")
     tickets = SealRegistry(seal_path()).tickets(pocket, market)
     if new_cycle:
+        _swing_only(pocket, "periods --new-cycle")
         if not any(t.cycle == rec.cycle for t in tickets):
             raise LabError(f"no final candidate opened the seal in cycle {rec.cycle}: "
                            "nothing to re-validate")

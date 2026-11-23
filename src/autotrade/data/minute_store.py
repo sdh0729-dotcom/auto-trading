@@ -82,3 +82,17 @@ def minute_bounds(market: Market, symbol: str) -> tuple[pd.Timestamp, pd.Timesta
     lo = pd.read_parquet(files[0]).index.min()
     hi = pd.read_parquet(files[-1]).index.max()
     return lo, hi
+
+
+def minute_calendar(market: Market) -> pd.DatetimeIndex:
+    """Trading days (tz-naive local midnight) with regular-session bars of the market's
+    benchmark symbol, from the market's `minute_start`: the day-trade pocket's calendar."""
+    from autotrade.config import load_market_raw
+    mc = load_market_raw(market)
+    if mc.minute_start is None or mc.benchmark is None:
+        return pd.DatetimeIndex([], name="date")
+    df = load_minutes(market, mc.benchmark, mc.minute_start, date(2100, 1, 1))
+    if df.empty:
+        return pd.DatetimeIndex([], name="date")
+    days = df.index.tz_convert(TZ[market]).tz_localize(None).normalize().unique()
+    return pd.DatetimeIndex(days.sort_values(), name="date")

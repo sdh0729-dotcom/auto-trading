@@ -620,7 +620,8 @@ def screen(pocket: str, market: str, family: str = "all") -> pd.DataFrame:
         syms = _minute_universe(market)
         for n in names:
             df = screen_intraday(n, market, syms, t0, t1, panel, elig, cm, rules, log, pocket,
-                                 sealed_start=s.periods.sealed[0])
+                                 sealed_start=s.periods.sealed[0],
+                                 cost_r_max=s.lab.criteria.cost_r_max)
             frames.append(df.assign(family=n))
         return _screen_table(frames)
     for n in names:
@@ -643,12 +644,10 @@ def _session_rules(mc: MarketConfig) -> SessionRules:
 
 
 def _minute_universe(market: str) -> list[str]:
-    """Symbols that have stored minute data, in the collector's universe order."""
+    """Symbols that have stored minute data, sorted. Deliberately independent of any daily
+    data: the screen's symbol set must not look past the train end."""
     root = minute_dir(market, "x").parent
-    have = {p.name for p in root.iterdir() if p.is_dir()} if root.exists() else set()
-    mc = load_market_raw(market)
-    ordered = minute_symbols(market, mc.minute_start, date.today(), load_lab().universe_top_n)
-    return [s for s in ordered if s in have]
+    return sorted(p.name for p in root.iterdir() if p.is_dir()) if root.exists() else []
 
 
 # ---------------------------------------------------------------- validate

@@ -131,10 +131,34 @@ def test_screen_intraday_refuses_a_period_reaching_the_seal(env):
     from autotrade.validate.seal import SealViolation
     with pytest.raises(SealViolation):
         screen_run.screen_intraday("toy", "kr", [], date(2023, 1, 2), date(2023, 2, 1), None,
-                                   None, None, None, None, "daytrade", date(2023, 2, 1))
+                                   None, None, None, None, "daytrade", date(2023, 2, 1), cost_r_max=0.15)
 
 
 def test_validate_refuses_the_daytrade_pocket(env):
     pipeline.screen("daytrade", "kr", "toy")
     with pytest.raises(pipeline.LabError, match="daytrade"):
         pipeline.validate("daytrade", "kr", 3)
+
+
+def test_symbol_choice_reads_no_data_after_train_end(env, monkeypatch):
+    daily_ends = []
+    real = pipeline.load_panel
+
+    def spy(market, symbols, start, end):
+        daily_ends.append(end)
+        return real(market, symbols, start, end)
+    monkeypatch.setattr(pipeline, "load_panel", spy)
+
+    def boom(*a, **k):
+        raise AssertionError("symbol choice must not use the full-history daily universe")
+    monkeypatch.setattr(pipeline, "minute_symbols", boom)
+    pipeline.screen("daytrade", "kr", "toy")
+    rec = pipeline.period_store.load_record(pipeline.periods_path("daytrade", "kr"))
+    assert daily_ends and max(daily_ends) <= rec.periods.train[1]
+
+
+def test_cost_r_max_comes_from_the_lab_criteria(env, monkeypatch):
+    pipeline.screen("daytrade", "kr", "toy")
+    log = ExperimentLog(pipeline.experiments_path())
+    assert log.n_trials("daytrade", "kr") == 2      # the skipped precheck point counts too
+    assert not hasattr(screen_run, "PRECHECK_COST_R")

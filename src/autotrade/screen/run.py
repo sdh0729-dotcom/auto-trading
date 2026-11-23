@@ -68,11 +68,6 @@ def screen_family(family: str, panel: Panel, eligible: pd.DataFrame, start: date
     return pd.DataFrame(out, columns=SCREEN_COLUMNS)
 
 
-# an intraday grid point whose round-trip cost exceeds this many stop-distances (R) is not
-# simulated: costs alone would eat the edge (spec: lab.criteria.cost_r_max)
-PRECHECK_COST_R = 0.15
-
-
 def _stack_features(per_symbol: dict[str, pd.DataFrame]) -> pd.DataFrame:
     frames = [f.assign(symbol=s).set_index("symbol", append=True)
               for s, f in per_symbol.items() if len(f)]
@@ -86,12 +81,12 @@ def _stack_features(per_symbol: dict[str, pd.DataFrame]) -> pd.DataFrame:
 def screen_intraday(family: str, market: str, symbols: list[str], start: date, end: date,
                     daily: Panel, eligible: pd.DataFrame, cost_model: CostModel,
                     rules: SessionRules, log: ExperimentLog, pocket: str,
-                    sealed_start: date) -> pd.DataFrame:
+                    sealed_start: date, cost_r_max: float) -> pd.DataFrame:
     """One row per grid params (as `screen_family`). Minute bars are loaded per symbol only
     through `end`. Pass 1 builds the family's day features, then `select` picks the
     symbol-days per grid point and every symbol's bars are loaded once more to build and
     execute the candidates of all grid points. A grid point whose median round-trip cost
-    exceeds PRECHECK_COST_R of its median stop is logged as stage "precheck" and skipped."""
+    exceeds `cost_r_max` (lab.criteria) of its median stop is logged as stage "precheck" and skipped."""
     if pd.Timestamp(end) >= pd.Timestamp(sealed_start):
         raise SealViolation(f"screen end {end} reaches sealed period starting {sealed_start}")
     if pd.Timestamp(start) > pd.Timestamp(end):
@@ -145,7 +140,7 @@ def screen_intraday(family: str, market: str, symbols: list[str], start: date, e
     for rule in grid:
         pcts, stops = cost[rule.rule_id]
         cost_r = float(np.median(pcts) / np.median(stops)) if pcts and stops else math.nan
-        if cost_r > PRECHECK_COST_R:
+        if cost_r > cost_r_max:
             log.record(pocket, market, family, rule.rule_id, rule.params, "precheck", period,
                        {"cost_r": cost_r})
             continue

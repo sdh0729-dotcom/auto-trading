@@ -11,7 +11,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-Stage = Literal["screen", "validate", "final", "cycle_started"]
+Stage = Literal["screen", "precheck", "validate", "final", "cycle_started"]
 STAGES = ("screen", "precheck", "validate", "final", "cycle_started")
 _FIELDS = ["ts", "pocket", "market", "family", "rule_id", "params", "stage", "period", "metrics"]
 
@@ -52,6 +52,7 @@ class ExperimentLog:
         return pd.DataFrame(rows, columns=_FIELDS)
 
     def n_trials(self, pocket: str, market: str) -> int:
-        """Distinct rule_ids screened for this pocket x market (DSR trial count)."""
+        """Distinct rule_ids tried for this pocket x market (DSR trial count): every grid
+        point generated counts, including those the cost precheck skipped."""
         rows = self.rows(pocket, market)
-        return int(rows.loc[rows["stage"] == "screen", "rule_id"].nunique())
+        return int(rows.loc[rows["stage"].isin(("screen", "precheck")), "rule_id"].nunique())

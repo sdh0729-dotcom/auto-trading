@@ -151,3 +151,85 @@ def test_orb_sip_select_applies_the_us_atr_floor_and_trusts_eligible():
     sel = OrbStocksInPlay({"stop_atr": 0.5, "or_minutes": 5}).select(stacked, panel, elig)
     last = {s for d, s in sel if d == DAYS[-1]}
     assert "S24" not in last and "S23" not in last and "S22" in last
+
+
+# ---- momentum families (Task 7) ----
+KR_TZ = "Asia/Seoul"
+
+
+def _mom_bars(day, tz, start, n, closes):
+    ends = pd.date_range(f"{day:%Y-%m-%d} {start}", periods=n, freq="min", tz=tz)
+    c = np.asarray(closes(ends), dtype=float)
+    return pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": 1000.0},
+                        index=pd.DatetimeIndex(ends, name="ts"))
+
+
+def _mom_panel(symbols, prev=100.0, products=None):
+    p = make_panel(120, symbols, seed=3, start="2023-11-01", products=products)
+    for s in symbols:
+        p.close[s] = prev
+    return p
+
+
+def test_intraday_mom_signal_bar_and_exit_kr():
+    from autotrade.rules.daytrade.momentum import IntradayMomentum
+    d = DAYS[20]
+    # prev close 100; closes 101 through the bar ending 09:30, 100 afterwards
+    bars = _mom_bars(d, KR_TZ, "09:01", 380,
+                     lambda e: np.where(e <= pd.Timestamp(f"{d:%Y-%m-%d} 09:30", tz=KR_TZ), 101.0, 100.0))
+    panel = _mom_panel(["069500"], products={"069500": "etf"})
+    days = pd.DatetimeIndex([pd.Timestamp(d)])
+    c = IntradayMomentum({"threshold": 0.005}).candidates("069500", bars, days, panel)
+    assert len(c) == 1
+    assert c.iloc[0]["signal_ts"] == pd.Timestamp(f"{d:%Y-%m-%d} 14:50", tz=KR_TZ)
+    assert c.iloc[0]["exit_ts"] == pd.Timestamp(f"{d:%Y-%m-%d} 15:20", tz=KR_TZ)
+    assert c.iloc[0]["stop_pct"] == 0.02 and c.iloc[0]["confidence"] == pytest.approx(1.0)
+    assert IntradayMomentum({"threshold": 0.02}).candidates("069500", bars, days, panel).empty
+    # missing 14:50 bar -> last bar at or before it, never a later one
+    gap = bars.drop(bars.index[(bars.index > pd.Timestamp(f"{d:%Y-%m-%d} 14:45", tz=KR_TZ))
+                               & (bars.index <= pd.Timestamp(f"{d:%Y-%m-%d} 14:50", tz=KR_TZ))])
+    g = IntradayMomentum({"threshold": 0.0}).candidates("069500", gap, days, panel)
+    assert g.iloc[0]["signal_ts"] == pd.Timestamp(f"{d:%Y-%m-%d} 14:45", tz=KR_TZ)
+    # US: signal 15:30, exit at session end
+    ub = _mom_bars(d, TZ, "09:31", 390,
+                   lambda e: np.where(e <= pd.Timestamp(f"{d:%Y-%m-%d} 10:00", tz=TZ), 101.0, 100.0))
+    u = IntradayMomentum({"threshold": 0.0}).candidates(
+        "SPY", ub, days, _mom_panel(["SPY"], products={"SPY": "etf"}))
+    assert u.iloc[0]["signal_ts"] == pd.Timestamp(f"{d:%Y-%m-%d} 15:30", tz=TZ)
+    assert pd.isna(u.iloc[0]["exit_ts"])
+
+
+def test_close_mom_reversal_goes_long_after_a_down_day():
+    from autotrade.rules.daytrade.momentum import CloseMomentum
+    d = DAYS[20]
+    days = pd.DatetimeIndex([pd.Timestamp(d)])
+    panel = _mom_panel(["SPY"], products={"SPY": "etf"})
+    down = _mom_bars(d, TZ, "09:31", 390, lambda e: np.full(len(e), 99.0))
+    up = _mom_bars(d, TZ, "09:31", 390, lambda e: np.full(len(e), 101.0))
+    rev = CloseMomentum({"direction": "reversal", "min_move": 0.0})
+    mom = CloseMomentum({"direction": "momentum", "min_move": 0.0})
+    assert len(rev.candidates("SPY", down, days, panel)) == 1
+    assert rev.candidates("SPY", up, days, panel).empty
+    assert len(mom.candidates("SPY", up, days, panel)) == 1
+    assert mom.candidates("SPY", down, days, panel).empty
+    # min_move 0.005 filters a 0.1% move
+    flat = _mom_bars(d, TZ, "09:31", 390, lambda e: np.full(len(e), 99.9))
+    assert CloseMomentum({"direction": "reversal", "min_move": 0.005}).candidates(
+        "SPY", flat, days, panel).empty
+    assert len(CloseMomentum.grid()) == 4
+
+
+def test_momentum_families_trade_index_etfs_only():
+    from autotrade.rules.daytrade.momentum import CloseMomentum, IntradayMomentum
+    syms = ["SPY", "QQQ", "XLK", "AAPL"]
+    panel = _mom_panel(syms, products={"SPY": "etf", "QQQ": "etf", "XLK": "etf"})
+    elig = pd.DataFrame(True, index=panel.close.index, columns=syms)
+    elig["QQQ"] = False                                  # universe says no
+    feats = pd.DataFrame({"market": "us"},
+                         index=pd.MultiIndex.from_product([[DAYS[20]], syms], names=["day", "symbol"]))
+    cm = {s for _, s in CloseMomentum({"direction": "momentum", "min_move": 0.0}).select(feats, panel, elig)}
+    im = {s for _, s in IntradayMomentum({"threshold": 0.0}).select(feats, panel, elig)}
+    assert cm == {"SPY"}
+    assert im == {"SPY", "XLK"}
+    assert DAYTRADE_FAMILIES["intraday_mom"] is IntradayMomentum
+    assert DAYTRADE_FAMILIES["close_mom"] is CloseMomentum and len(IntradayMomentum.grid()) == 3

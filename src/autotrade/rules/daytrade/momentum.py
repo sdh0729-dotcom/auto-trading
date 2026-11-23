@@ -24,7 +24,7 @@ import pandas as pd
 
 from autotrade.config import load_market_raw
 from autotrade.rules.daytrade.base import DAY_SYMBOL, IntradayRule, candidate_frame, empty_candidates
-from autotrade.rules.daytrade.orb import _day_slices, _market_of, _open_ts
+from autotrade.rules.daytrade._bars import _day_slices, _last_at_or_before, _market_of, _open_ts
 from autotrade.types import Panel
 
 STOP_PCT = 0.02
@@ -32,11 +32,6 @@ FIRST_MINUTES = 30
 SIGNAL_TIME = {"kr": "14:50", "us": "15:30"}
 KR_EXIT_TIME = "15:20"
 CONF_SCALE = 0.01
-
-
-def _last_at_or_before(dbars: pd.DataFrame, ts: pd.Timestamp):
-    sub = dbars[dbars.index <= ts]
-    return sub.iloc[-1:] if len(sub) else None
 
 
 def _market_features(bars: pd.DataFrame) -> pd.DataFrame:

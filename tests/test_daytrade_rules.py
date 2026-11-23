@@ -233,3 +233,121 @@ def test_momentum_families_trade_index_etfs_only():
     assert im == {"SPY", "XLK"}
     assert DAYTRADE_FAMILIES["intraday_mom"] is IntradayMomentum
     assert DAYTRADE_FAMILIES["close_mom"] is CloseMomentum and len(IntradayMomentum.grid()) == 3
+
+
+# ---- gap and KR opening-overreaction families (Task 8) ----
+
+def _ohlc_bars(day, tz, start, rows):
+    """rows: (open, high, low, close, volume) per minute from `start` (END-stamped)."""
+    ends = pd.date_range(f"{day:%Y-%m-%d} {start}", periods=len(rows), freq="min", tz=tz)
+    df = pd.DataFrame(rows, columns=["open", "high", "low", "close", "volume"], index=ends)
+    df.index.name = "ts"
+    return df
+
+
+def _gap_day(day, open_px, closes_after, low=None, n=40):
+    """US day: first bar opens at open_px; bars close at `closes_after(i)`."""
+    rows = []
+    for i in range(n):
+        c = closes_after(i)
+        rows.append((open_px if i == 0 else c, max(c, open_px), c if low is None else low(i), c, 100.0))
+    return _ohlc_bars(day, TZ, "09:31", rows)
+
+
+def test_gap_go_needs_confirmation():
+    from autotrade.rules.daytrade.gap import GapGo
+    d = DAYS[20]
+    days = pd.DatetimeIndex([d])
+    panel = _mom_panel(["X"], prev=100.0)
+    # +5% gap; confirm bar (09:35) closes above the open -> signal at 09:35
+    up = _gap_day(d, 105.0, lambda i: 106.0, low=lambda i: 104.0 if i == 2 else 105.5)
+    c = GapGo({"gap": 0.04, "confirm": 5}).candidates("X", up, days, panel)
+    assert len(c) == 1
+    assert c.iloc[0]["signal_ts"] == pd.Timestamp(f"{d:%Y-%m-%d} 09:35", tz=TZ)
+    assert c.iloc[0]["stop_pct"] == pytest.approx((106.0 - 104.0) / 106.0)
+    assert pd.isna(c.iloc[0]["exit_ts"]) and pd.isna(c.iloc[0]["target_pct"])
+    assert c.iloc[0]["confidence"] == pytest.approx(min(1.0, 0.05 / 0.08))
+    # confirmation bar closes below the open -> no trade
+    down = _gap_day(d, 105.0, lambda i: 104.0)
+    assert GapGo({"gap": 0.04, "confirm": 5}).candidates("X", down, days, panel).empty
+    # gap smaller than the threshold -> no trade
+    assert GapGo({"gap": 0.04, "confirm": 5}).candidates(
+        "X", _gap_day(d, 102.0, lambda i: 103.0), days, panel).empty
+    # a bar after the confirm window must not be used: close above open only from 09:36
+    late = _gap_day(d, 105.0, lambda i: 106.0 if i >= 5 else 104.0)
+    assert GapGo({"gap": 0.04, "confirm": 5}).candidates("X", late, days, panel).empty
+    # day-0 prev close uses strictly earlier rows (panel includes d: d's own close is 999)
+    p2 = _mom_panel(["X"], prev=100.0)
+    p2.close.loc[d, "X"] = 999.0
+    assert len(GapGo({"gap": 0.04, "confirm": 5}).candidates("X", up, days, p2)) == 1
+
+
+def test_gap_fade_target_is_half_gap():
+    from autotrade.rules.daytrade.gap import GapFade
+    d = DAYS[20]
+    days = pd.DatetimeIndex([d])
+    panel = _mom_panel(["X"], prev=100.0)
+    # -5% gap: opens 95; first bar low 94; signal bar (09:35) closes 95 > 94
+    rows = [(95.0, 95.5, 94.0, 95.0, 100.0)] + [(95.0, 95.5, 94.5, 95.0, 100.0)] * 39
+    bars = _ohlc_bars(d, TZ, "09:31", rows)
+    c = GapFade({"gap": 0.04, "confirm": 5, "stop_pct": 0.02}).candidates("X", bars, days, panel)
+    assert len(c) == 1
+    assert c.iloc[0]["signal_ts"] == pd.Timestamp(f"{d:%Y-%m-%d} 09:35", tz=TZ)
+    assert c.iloc[0]["target_pct"] == pytest.approx(0.05 / 2)
+    assert c.iloc[0]["stop_pct"] == 0.02 and pd.isna(c.iloc[0]["exit_ts"])
+    assert c.iloc[0]["confidence"] == pytest.approx(min(1.0, 0.05 / 0.08))
+    # signal close at/below the first bar's low -> no trade
+    rows2 = [(95.0, 95.5, 94.0, 95.0, 100.0)] + [(94.0, 94.0, 93.0, 93.5, 100.0)] * 39
+    assert GapFade({"gap": 0.04, "confirm": 5, "stop_pct": 0.02}).candidates(
+        "X", _ohlc_bars(d, TZ, "09:31", rows2), days, panel).empty
+    # a gap UP is not faded
+    assert GapFade({"gap": 0.04, "confirm": 5, "stop_pct": 0.02}).candidates(
+        "X", _gap_day(d, 105.0, lambda i: 106.0), days, panel).empty
+
+
+def _rev_bars(day, tz, first30_close, vol30):
+    """KR day: 09:01.. 120 bars; the bar ending 09:30 closes at first30_close."""
+    ends = pd.date_range(f"{day:%Y-%m-%d} 09:01", periods=120, freq="min", tz=tz)
+    c = np.where(ends <= pd.Timestamp(f"{day:%Y-%m-%d} 09:30", tz=tz), first30_close, 90.0)
+    v = np.where(ends <= pd.Timestamp(f"{day:%Y-%m-%d} 09:30", tz=tz), vol30 / 30, 10.0)
+    return pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": v},
+                        index=pd.DatetimeIndex(ends, name="ts"))
+
+
+def test_kr_open_rev_skips_us():
+    from autotrade.rules.daytrade.gap import OpenReversal
+    rule = OpenReversal({"drop": 0.03, "hold": 60, "stop_pct": 0.02})
+    days_idx = DAYS[:16]
+    kr = pd.concat([_rev_bars(x, KR_TZ, 100.0, 3000.0) for x in days_idx[:15]]
+                   + [_rev_bars(days_idx[15], KR_TZ, 95.0, 9000.0)])
+    panel = _mom_panel(["005930"], prev=100.0)
+    feats = rule.day_features("005930", kr)
+    # 14 prior days exist only for the 16th day (days 1..14 -> day 15 is the first with 14 priors)
+    assert feats["avg14"].iloc[:14].isna().all() and feats["avg14"].iloc[14] == pytest.approx(3000.0)
+    stacked = pd.concat({"005930": feats}, names=["symbol"]).swaplevel().sort_index()
+    elig = pd.DataFrame(True, index=panel.close.index, columns=panel.close.columns)
+    sel = rule.select(stacked, panel, elig)
+    assert list(sel) == [(days_idx[15], "005930")]  # only the day with >= 2x the average
+    last = days_idx[15]
+    c = rule.candidates("005930", kr, pd.DatetimeIndex([last]), panel)
+    assert len(c) == 1
+    assert c.iloc[0]["signal_ts"] == pd.Timestamp(f"{last:%Y-%m-%d} 09:30", tz=KR_TZ)
+    assert c.iloc[0]["exit_ts"] == pd.Timestamp(f"{last:%Y-%m-%d} 10:30", tz=KR_TZ)
+    assert c.iloc[0]["stop_pct"] == 0.02 and c.iloc[0]["confidence"] == pytest.approx(0.5)
+    # drop not deep enough -> no candidate
+    assert OpenReversal({"drop": 0.05, "hold": 60, "stop_pct": 0.02}).candidates(
+        "005930", kr, pd.DatetimeIndex([last]), _mom_panel(["005930"], prev=97.0)).empty
+    # US bars: nothing selected, nothing generated
+    us = pd.concat([_rev_bars(x, TZ, 95.0, 9000.0) for x in days_idx])
+    assert rule.day_features("SPY", us).empty or (rule.day_features("SPY", us)["market"] == "us").all()
+    ufeat = pd.concat({"SPY": rule.day_features("SPY", us)}, names=["symbol"]).swaplevel().sort_index()
+    uelig = pd.DataFrame(True, index=panel.close.index, columns=["SPY"])
+    assert len(rule.select(ufeat, panel, uelig)) == 0
+    assert rule.candidates("SPY", us, pd.DatetimeIndex(days_idx), _mom_panel(["SPY"])).empty
+
+
+def test_gap_families_registered_with_documented_grids():
+    from autotrade.rules.daytrade.gap import GapFade, GapGo, OpenReversal
+    assert DAYTRADE_FAMILIES["gap_go"] is GapGo and DAYTRADE_FAMILIES["gap_fade"] is GapFade
+    assert DAYTRADE_FAMILIES["kr_open_rev"] is OpenReversal
+    assert len(GapGo.grid()) == 4 and len(GapFade.grid()) == 8 and len(OpenReversal.grid()) == 8

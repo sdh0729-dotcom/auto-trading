@@ -20,34 +20,15 @@ import pandas as pd
 
 from autotrade.config import load_market_raw
 from autotrade.rules.daytrade.base import DAY_SYMBOL, IntradayRule, candidate_frame, empty_candidates
+from autotrade.rules.daytrade._bars import _day_slices, _market_of, _open_ts
 from autotrade.rules.indicators import atr
-from autotrade.types import TZ, Panel
+from autotrade.types import Panel
 
 TOP_N = 20
 MIN_REL_VOLUME = 1.0
 RV_WINDOW = 14
 FIRST_MINUTES = 5
 _MAX_STOP_PCT = 0.99
-
-
-def _market_of(bars: pd.DataFrame) -> str:
-    tz = str(bars.index.tz)
-    for m, name in TZ.items():
-        if name == tz:
-            return m
-    raise ValueError(f"unknown bar timezone {tz}")
-
-
-def _day_slices(bars: pd.DataFrame):
-    """(local day, bars of that day) for END-stamped tz-aware bars."""
-    local = bars.index.tz_localize(None)
-    day = local.normalize()
-    for d, idx in bars.groupby(day).indices.items():
-        yield pd.Timestamp(d), bars.iloc[idx]
-
-
-def _open_ts(day: pd.Timestamp, session_open: str, tz) -> pd.Timestamp:
-    return pd.Timestamp(f"{day:%Y-%m-%d} {session_open}", tz=tz)
 
 
 def _opening_range(dbars: pd.DataFrame, open_ts: pd.Timestamp, minutes: int):

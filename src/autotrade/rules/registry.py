@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from autotrade.rules.base import Rule
 from autotrade.rules.daytrade.base import IntradayRule
+from autotrade.rules.daytrade.gap import GapFade, GapGo, OpenReversal
 from autotrade.rules.daytrade.momentum import CloseMomentum, IntradayMomentum
 from autotrade.rules.daytrade.orb import Orb, OrbStocksInPlay
 from autotrade.rules.swing.breakout import Breakout
@@ -18,7 +19,8 @@ SWING_FAMILIES: dict[str, type[Rule]] = {
     "reversal": Reversal, "overnight": Overnight, "tom": Tom, "etf_rotation": EtfRotation,
 }
 
-# intraday families (Tasks 6-8 register theirs here)
+# intraday families (Tasks 6-8)
 DAYTRADE_FAMILIES: dict[str, type[IntradayRule]] = {"orb_sip": OrbStocksInPlay, "orb": Orb,
                                                    "intraday_mom": IntradayMomentum,
-                                                   "close_mom": CloseMomentum}
+                                                   "close_mom": CloseMomentum, "gap_go": GapGo,
+                                                   "gap_fade": GapFade, "kr_open_rev": OpenReversal}

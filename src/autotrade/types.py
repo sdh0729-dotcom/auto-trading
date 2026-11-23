@@ -14,7 +14,8 @@ Product = Literal["stock", "etf"]
 
 TRADE_COLUMNS = ["symbol", "entry_date", "entry_price", "exit_date", "exit_price",
                  "exit_reason", "stop_pct", "confidence"]
-EXIT_REASONS = ("signal", "stop", "gap_stop", "max_hold", "period_end", "data_end")
+EXIT_REASONS = ("signal", "stop", "gap_stop", "max_hold", "period_end", "data_end",
+                "target", "session_end")
 META_COLUMNS = ["name", "security_type", "product", "is_common_share", "delisted", "source",
                 "leverage_factor", "english_name"]   # last two: ETFs from /api/v1/stocks
 

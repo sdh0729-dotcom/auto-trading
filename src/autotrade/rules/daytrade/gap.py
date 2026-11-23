@@ -36,30 +36,38 @@ def _signal_bar(dbars: pd.DataFrame, o: pd.Timestamp, minutes: int):
     return sig if sig is not None and sig.index[0] > o else None
 
 
+def _scan_days(symbol, bars, days, daily, minutes, build, market_only=None):
+    """Shared per-day plumbing: for each wanted day with a finite prev close and a signal bar
+    (open + `minutes`), `build(d, db, sig, pc)` returns a candidate dict or None."""
+    if bars.empty or not len(days) or symbol not in daily.close.columns:
+        return empty_candidates()
+    market = _market_of(bars)
+    if market_only is not None and market != market_only:
+        return empty_candidates()
+    sess = load_market_raw(market).session_open
+    prev = daily.close[symbol].shift(1)
+    want = set(pd.DatetimeIndex(days))
+    rows = []
+    for d, db in _day_slices(bars):
+        if d not in want:
+            continue
+        pc = prev.get(d, np.nan)
+        if not np.isfinite(pc) or pc <= 0:
+            continue
+        sig = _signal_bar(db, _open_ts(d, sess, bars.index.tz), minutes)
+        if sig is None:
+            continue
+        row = build(d, db, sig, pc)
+        if row is not None:
+            rows.append(row)
+    return candidate_frame(rows)
+
+
 class _Gap(IntradayRule):
     def _scan(self, symbol, bars, days, daily, build):
-        """build(db, sig, gap, day_open, signal_end_slice) -> dict|None; shared gap plumbing."""
-        if bars.empty or not len(days) or symbol not in daily.close.columns:
-            return empty_candidates()
-        sess = load_market_raw(_market_of(bars)).session_open
-        prev = daily.close[symbol].shift(1)
-        want = set(pd.DatetimeIndex(days))
-        rows = []
-        for d, db in _day_slices(bars):
-            if d not in want:
-                continue
-            pc = prev.get(d, np.nan)
-            if not np.isfinite(pc) or pc <= 0:
-                continue
-            o = _open_ts(d, sess, bars.index.tz)
-            sig = _signal_bar(db, o, self.params["confirm"])
-            if sig is None:
-                continue
-            gap = float(db["open"].iloc[0]) / pc - 1.0
-            row = build(d, db, sig, gap)
-            if row is not None:
-                rows.append(row)
-        return candidate_frame(rows)
+        """build(d, db, sig, gap) -> dict|None, gap = day open / prev close - 1."""
+        return _scan_days(symbol, bars, days, daily, self.params["confirm"],
+                          lambda d, db, sig, pc: build(d, db, sig, float(db["open"].iloc[0]) / pc - 1.0))
 
 
 class GapGo(_Gap):
@@ -150,31 +158,13 @@ class OpenReversal(IntradayRule):
         return pd.MultiIndex.from_tuples(pairs, names=DAY_SYMBOL) if pairs else empty
 
     def candidates(self, symbol, bars, days, daily):
-        if bars.empty or not len(days) or symbol not in daily.close.columns:
-            return empty_candidates()
-        market = _market_of(bars)
-        if market != "kr":
-            return empty_candidates()
-        sess = load_market_raw(market).session_open
-        prev = daily.close[symbol].shift(1)
-        want = set(pd.DatetimeIndex(days))
-        rows = []
-        for d, db in _day_slices(bars):
-            if d not in want:
-                continue
-            pc = prev.get(d, np.nan)
-            if not np.isfinite(pc) or pc <= 0:
-                continue
-            o = _open_ts(d, sess, bars.index.tz)
-            sig = _signal_bar(db, o, FIRST_MINUTES)
-            if sig is None:
-                continue
+        def build(d, db, sig, pc):
             ret = float(sig["close"].iloc[0]) / pc - 1.0
             if ret > -self.params["drop"]:
-                continue
+                return None
             ts = sig.index[0]
-            rows.append({"day": d, "signal_ts": ts, "stop_pct": self.params["stop_pct"],
-                         "target_pct": np.nan,
-                         "exit_ts": ts + pd.Timedelta(minutes=self.params["hold"]),
-                         "confidence": float(min(1.0, abs(ret) / DROP_CONF_SCALE))})
-        return candidate_frame(rows)
+            return {"day": d, "signal_ts": ts, "stop_pct": self.params["stop_pct"],
+                    "target_pct": np.nan,
+                    "exit_ts": ts + pd.Timedelta(minutes=self.params["hold"]),
+                    "confidence": float(min(1.0, abs(ret) / DROP_CONF_SCALE))}
+        return _scan_days(symbol, bars, days, daily, FIRST_MINUTES, build, market_only="kr")

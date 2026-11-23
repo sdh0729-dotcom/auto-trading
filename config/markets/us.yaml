@@ -15,3 +15,6 @@ fractional_orders: true
 benchmark: SPY    # S&P 500
 # ETFs need a known leverage factor (= 1) from /api/v1/stocks; US names are bare tickers
 etf_leverage_required: true
+session_open: "09:30"
+session_close: "16:00"
+minute_start: 2021-12-01

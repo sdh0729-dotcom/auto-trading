@@ -92,6 +92,7 @@ class MarketConfig:
     # exclude ETFs whose leverage factor is unknown (US: names are bare tickers, so the
     # name keywords cannot catch leveraged/inverse ETFs without it)
     etf_leverage_required: bool = False
+    minute_start: date | None = None  # first day of stored 1-minute history
 
 
 @dataclass(frozen=True)

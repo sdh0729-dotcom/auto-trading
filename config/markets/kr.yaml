@@ -17,3 +17,4 @@ delisted_supplement: true
 fractional_orders: false
 # validate recommends a rule only if its valid-period return beats buying and holding this
 benchmark: "069500"    # KODEX 200
+minute_start: 2022-11-23

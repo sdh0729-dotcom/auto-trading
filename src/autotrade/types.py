@@ -7,6 +7,7 @@ from typing import Literal
 import pandas as pd
 
 Market = Literal["kr", "us"]
+TZ: dict[str, str] = {"kr": "Asia/Seoul", "us": "America/New_York"}
 Pocket = Literal["swing", "daytrade"]
 Scenario = Literal["real", "paper"]
 Product = Literal["stock", "etf"]

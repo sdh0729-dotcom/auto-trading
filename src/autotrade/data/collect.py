@@ -9,11 +9,10 @@ import pandas as pd
 from autotrade.data.quality import clean_daily
 from autotrade.data.store import PRICE_COLUMNS, load_daily, save_daily, save_meta
 from autotrade.toss.client import TossApiError, TossClient
-from autotrade.types import Market
+from autotrade.types import TZ, Market
 
 log = logging.getLogger(__name__)
 
-TZ = {"kr": "Asia/Seoul", "us": "America/New_York"}
 BOARDS = {"kr": ["KOSPI", "KOSDAQ"], "us": ["NYSE", "NASDAQ", "AMEX"]}
 PRODUCT = {"STOCK": "stock", "FOREIGN_STOCK": "stock", "ETF": "etf", "FOREIGN_ETF": "etf"}
 OHLC = ["open", "high", "low", "close"]

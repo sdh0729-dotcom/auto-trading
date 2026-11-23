@@ -11,3 +11,5 @@ always_include: ["SPY", "QQQ"]
 exclude_name_keywords: ["레버리지", "인버스", "2X", "3X", "울트라", "숏", "Ultra", "UltraPro", "UltraShort", "Bear", "Short", "Inverse"]
 delisted_supplement: false
 fractional_orders: true
+# validate recommends a rule only if its valid-period return beats buying and holding this
+benchmark: SPY    # S&P 500

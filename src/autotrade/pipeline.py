@@ -547,6 +547,20 @@ class ValidateResult:
     pbo: float                   # over the whole pool
     recommended: list[str]
     n_pool: int = 0
+    benchmark: str | None = None
+    benchmark_return: float | None = None
+
+
+def benchmark_return(market: str, symbol: str, start: date, end: date) -> float:
+    """Buy-and-hold price return of `symbol` from its first to its last close in [start, end]
+    (no costs, so the bar a rule must clear is, if anything, slightly high)."""
+    df = load_bars(market, symbol)
+    if df is None or df.empty:
+        raise LabError(f"benchmark {symbol} has no stored prices: run `lab collect --market {market}`")
+    c = df["close"][(df.index >= pd.Timestamp(start)) & (df.index <= pd.Timestamp(end))].dropna()
+    if len(c) < 2:
+        raise LabError(f"benchmark {symbol} has no prices in {start}~{end}")
+    return float(c.iloc[-1] / c.iloc[0] - 1.0)
 
 
 def _pbo(perf: pd.DataFrame) -> float:
@@ -572,7 +586,8 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     paper portfolio on the valid period, PBO over the whole pool's valid daily returns, each
     pool rule logged as stage "validate" (the trial-variance pool of verify). `top` only
     picks the candidates printed and recommended: the first `top` by train mean_net_r;
-    recommend up to max_final_candidates of them with valid net_pnl > 0 by valid daily
+    recommend up to max_final_candidates of them with valid net_pnl > 0 and a valid return
+    (net_pnl / capital) above the market benchmark's buy-and-hold return, by valid daily
     Sharpe. Every run increments the period file's validate_runs counter."""
     if top < 1:
         raise LabError("--top must be >= 1")
@@ -603,6 +618,8 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     cpk = _currency_per_krw(s.market, s.synced)
     capital = s.lab.capital["paper"]
     segments = period_segments(v0, v1, n=VALID_SEGMENTS)
+    bench = s.market.benchmark
+    bench_ret = benchmark_return(market, bench, v0, v1) if bench else None
 
     metrics, returns = {}, {}
     for fam, params, rid, scr_r in zip(cands["family"], cands["params"], cands["rule_id"],
@@ -625,13 +642,16 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
             "valid_segments_positive": int(sum(x > 0 for x in seg_sums)),
             "valid_n_trades": int(len(res.fills)),
             "valid_net_pnl": float(res.fills["net_pnl"].astype(float).sum()),
+            "valid_return": float(res.fills["net_pnl"].astype(float).sum()) / (capital * cpk),
+            "benchmark": bench, "benchmark_return": bench_ret,
             "valid_daily_sharpe": sharpe(rets.to_numpy(), periods_per_year=1),
             "valid_sharpe_annual": sharpe(rets.to_numpy()),
             "valid_mdd": max_drawdown(eq), "scenario": "paper", "capital_krw": capital,
             "capital_ccy": capital * cpk, "currency": s.market.currency,
         }
     pbo = _pbo(pd.DataFrame(returns).fillna(0.0))
-    ranked = sorted((rid for rid in top_ids if metrics[rid]["valid_net_pnl"] > 0),
+    ranked = sorted((rid for rid in top_ids if metrics[rid]["valid_net_pnl"] > 0
+                     and (bench_ret is None or metrics[rid]["valid_return"] > bench_ret)),
                     key=lambda r: (-metrics[r]["valid_daily_sharpe"]
                                    if np.isfinite(metrics[r]["valid_daily_sharpe"])
                                    else math.inf))
@@ -645,11 +665,11 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
         log.record(pocket, market, m["family"], rid, m["params"], "validate", _iso((v0, v1)),
                    {k: v for k, v in m.items() if k not in ("family", "params")})
     table = pd.DataFrame([{"rule_id": rid, **{k: metrics[rid][k] for k in (
-        "valid_net_pnl", "valid_daily_sharpe", "valid_n_trades", "valid_segments_positive",
-        "recommended")}} for rid in top_ids])
+        "valid_net_pnl", "valid_return", "valid_daily_sharpe", "valid_n_trades",
+        "valid_segments_positive", "recommended")}} for rid in top_ids])
     table = table.sort_values("valid_daily_sharpe", ascending=False, na_position="last",
                               kind="stable").reset_index(drop=True)
-    return ValidateResult(table, pbo, recommended, len(metrics))
+    return ValidateResult(table, pbo, recommended, len(metrics), bench, bench_ret)
 
 
 # ---------------------------------------------------------------- verify --final

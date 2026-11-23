@@ -16,6 +16,7 @@ from autotrade.validate.experiments import ExperimentLog
 from autotrade.validate.split import split_periods
 from tests.fixtures import make_panel
 
+REAL_BENCHMARK_RETURN = pipeline.benchmark_return
 SYMBOLS = ["069500", "A01", "A02", "A03", "A04", "A05", "A06", "A07"]
 N_DAYS = 1000
 SCALE = 80.0          # ~8,000 KRW ETFs: pass the KR tick-cost filter and the real price cap
@@ -56,6 +57,8 @@ def cli_env(tmp_path, monkeypatch):
     def no_network(*a, **k):
         raise AssertionError("network client must not be created in this test")
     monkeypatch.setattr(pipeline, "make_client_from_env", no_network)
+    # synthetic random walks rarely beat holding 069500; the benchmark gate has its own tests
+    monkeypatch.setattr(pipeline, "benchmark_return", lambda *a, **k: -1.0)
     write_synthetic()
     return env
 
@@ -1190,3 +1193,38 @@ def test_consecutive_failure_abort_message_is_one_line_without_details(
     assert r.exit_code == 1 and len(r.output.strip().splitlines()) == 1
     assert "2 consecutive" in r.output and expected in r.output
     assert "s3cr3t" not in r.output and "req-123" not in r.output
+
+
+def test_validate_reports_the_benchmark_and_recommends_only_rules_beating_it(cli_env,
+                                                                            monkeypatch):
+    monkeypatch.setattr(pipeline, "benchmark_return", REAL_BENCHMARK_RETURN)
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    r = run(["validate", "--pocket", "swing", "--market", "kr", "--top", "5"])
+    per = periods_of(cli_env)
+    close = store.load_bars("kr", "069500")["close"]
+    c = close[(close.index >= pd.Timestamp(per.valid[0])) & (close.index <= pd.Timestamp(per.valid[1]))]
+    expected = float(c.iloc[-1] / c.iloc[0] - 1.0)
+    rows = ExperimentLog(cli_env.research / "experiments.jsonl").rows("swing", "kr")
+    val = rows[rows["stage"] == "validate"]
+    for m in val["metrics"]:
+        assert m["benchmark"] == "069500"
+        assert m["benchmark_return"] == pytest.approx(expected)
+        assert m["valid_return"] == pytest.approx(m["valid_net_pnl"] / m["capital_ccy"])
+        if m["recommended"]:
+            assert m["valid_return"] > m["benchmark_return"] and m["valid_net_pnl"] > 0
+    assert "benchmark 069500 buy-and-hold" in r.output
+
+
+def test_validate_recommends_nothing_when_the_benchmark_beats_every_rule(cli_env, monkeypatch):
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    monkeypatch.setattr(pipeline, "benchmark_return", lambda *a, **k: 10.0)   # +1000%
+    r = run(["validate", "--pocket", "swing", "--market", "kr", "--top", "5"])
+    assert "recommended for verify --final: (none)" in r.output
+
+
+def test_validate_refuses_a_missing_benchmark(cli_env, monkeypatch):
+    monkeypatch.setattr(pipeline, "benchmark_return", REAL_BENCHMARK_RETURN)
+    run(["screen", "--pocket", "swing", "--market", "kr", "--family", "breakout"])
+    (store.data_root() / "kr" / "1d" / "069500.parquet").unlink()
+    r = CliRunner().invoke(app, ["validate", "--pocket", "swing", "--market", "kr"])
+    assert r.exit_code == 1 and "benchmark 069500" in r.output

@@ -28,13 +28,12 @@ import numpy as np
 import pandas as pd
 
 from autotrade.data.delisted_kr import CALL_INTERVAL_S, PYKRX_COLUMNS, _pykrx_ohlcv
-from autotrade.data.quality import clean_daily
+from autotrade.data.quality import clean_daily, fix_rounding
 from autotrade.data.store import DAILY_COLUMNS, data_root, load_daily, write_parquet_atomic
 
 NXT_START = pd.Timestamp("2025-03-04")
 FETCH_LEAD_DAYS = 45          # also fetch this much before NXT_START: shared pre-NXT dates
 SCALE_TOL = 0.005
-ROUNDING_TOL = 0.001          # pykrx adjusted-price rounding: high/low off by a won or two
 MIN_SHARED_DAYS = 5
 SOURCE = "krx"
 log = logging.getLogger(__name__)
@@ -69,21 +68,6 @@ def fetch_krx_daily(symbol: str, start: date, end: date) -> pd.DataFrame:
     df = fix_rounding(df)
     df["source"] = SOURCE
     return df[DAILY_COLUMNS]
-
-
-def fix_rounding(df: pd.DataFrame) -> pd.DataFrame:
-    """pykrx adjusted bars are rounded per field, so the high can come out a won or two
-    below the close (e.g. high 876,387 / close 876,388). Widen high/low to cover open and
-    close when the overshoot is <= ROUNDING_TOL of the price; larger overshoots are left for
-    the quality check to reject."""
-    out = df.copy()
-    top = out[["open", "close"]].max(axis=1)
-    bottom = out[["open", "close"]].min(axis=1)
-    up = (top > out["high"]) & ((top - out["high"]) <= ROUNDING_TOL * top)
-    down = (bottom < out["low"]) & ((out["low"] - bottom) <= ROUNDING_TOL * bottom)
-    out.loc[up, "high"] = top[up]
-    out.loc[down, "low"] = bottom[down]
-    return out
 
 
 def same_scale(toss: pd.DataFrame, krx: pd.DataFrame) -> bool:

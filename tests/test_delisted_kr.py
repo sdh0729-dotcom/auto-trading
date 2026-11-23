@@ -172,3 +172,18 @@ def test_add_delisted_meta_appends_only_unknown_symbols():
     assert bool(out.loc["053810", "delisted"]) and out.loc["053810", "product"] == "stock"
     assert out.loc["053810", "source"] == "kind" and bool(out.loc["053810", "is_common_share"])
     assert list(out.columns) == list(meta.columns)
+
+
+def test_delisted_bars_absorb_rounding_but_keep_real_errors(monkeypatch):
+    """Same pykrx adjusted-price rounding as the KRX overlay: a low-priced stock's close can
+    land a few won (up to ~0.35%) above the high. That is absorbed; a 9% gap is not."""
+    from autotrade.data.quality import hard_issues
+    raw = korean_cols_df(3)
+    d1, d2 = raw.index[1], raw.index[2]
+    raw.loc[d1, ["시가", "고가", "저가", "종가"]] = [378, 381, 377, 382]      # 1 won / 0.26%
+    raw.loc[d2, ["시가", "고가", "저가", "종가"]] = [100, 101, 99, 110]       # 9%
+    monkeypatch.setattr(delisted_kr, "_pykrx_ohlcv", lambda *a, **k: raw)
+    df = fetch_delisted_daily("000000", date(2018, 1, 1), date(2018, 12, 31))
+    assert df.loc[d1, "high"] == 382
+    assert df.loc[d2, "high"] == 101
+    assert hard_issues(df.drop(d2)) == []

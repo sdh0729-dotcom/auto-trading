@@ -24,7 +24,7 @@ from pathlib import Path
 import httpx
 import pandas as pd
 
-from autotrade.data.quality import clean_daily, hard_issues
+from autotrade.data.quality import clean_daily, fix_rounding, hard_issues
 from autotrade.data.store import data_root, load_daily, load_meta, save_daily
 
 PYKRX_COLUMNS = {"시가": "open", "고가": "high", "저가": "low", "종가": "close", "거래량": "volume"}
@@ -105,8 +105,9 @@ def fetch_delisted_daily(symbol: str, start: date, end: date) -> pd.DataFrame:
     raw = _pykrx_ohlcv(start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), symbol, adjusted=True)
     if raw is None or raw.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "source"])
-    df = raw.rename(columns=PYKRX_COLUMNS)[list(PYKRX_COLUMNS.values())].copy()
+    df = raw.rename(columns=PYKRX_COLUMNS)[list(PYKRX_COLUMNS.values())].astype(float)
     df = clean_daily(df)            # suspension days (O/H/L=0, volume=0) are not real bars
+    df = fix_rounding(df)
     df.index = pd.DatetimeIndex(pd.to_datetime(df.index)).tz_localize(None).normalize()
     df.index.name = "date"
     df["source"] = "pykrx"

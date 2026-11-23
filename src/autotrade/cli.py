@@ -72,6 +72,16 @@ def sync(kr_commission: Optional[float] = typer.Option(
                f"usd_krw={out['usd_krw']}")
 
 
+@app.command("collect-minute")
+@_expected_errors
+def collect_minute(market: str = typer.Option(..., help="kr | us"),
+                   limit: Optional[int] = typer.Option(None, help="first N symbols only")):
+    """1-minute bars for the daily universe (resumable; waits while the daily job runs)."""
+    s = pipeline.collect_minute(market, limit)
+    typer.echo(f"symbols {s['symbols']}, added {s['added']} | complete {s['complete']}, "
+               f"not found {s['not_found']}, failed {s['failed']}")
+
+
 @app.command()
 @_expected_errors
 def collect(market: str = typer.Option(..., help="kr | us"),

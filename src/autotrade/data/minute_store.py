@@ -16,8 +16,9 @@ def minute_dir(market: Market, symbol: str) -> Path:
     return data_root() / market / "1m" / symbol
 
 
-def _empty() -> pd.DataFrame:
-    return pd.DataFrame(columns=MINUTE_COLUMNS, index=pd.DatetimeIndex([], name="ts"),
+def _empty(market: Market) -> pd.DataFrame:
+    return pd.DataFrame(columns=MINUTE_COLUMNS,
+                        index=pd.DatetimeIndex([], name="ts", tz=TZ[market]),
                         dtype=float)
 
 
@@ -62,7 +63,7 @@ def load_minutes(market: Market, symbol: str, start: date, end: date,
     first, last = f"{start:%Y-%m}", f"{end:%Y-%m}"
     frames = [pd.read_parquet(p) for p in files if first <= p.stem <= last]
     if not frames:
-        return _empty()
+        return _empty(market)
     df = pd.concat(frames).sort_index()
     tz = TZ[market]
     local_day = df.index.tz_convert(tz).tz_localize(None).normalize()

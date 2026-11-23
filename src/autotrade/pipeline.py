@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ from autotrade.config import (ConfigError, LabConfig, MarketConfig, PocketConfig
                               load_pocket, load_synced, repo_root)
 from autotrade.costs import CostModel
 from autotrade.data.collect import collect_daily, collect_meta, market_today
+from autotrade.data.collect_minute import collect_minutes, minute_symbols
 from autotrade.data.delisted_kr import (KindError, add_delisted_meta, kind_delisted,
                                         save_supplement_record, supplement_delisted_kr)
 from autotrade.data.krx_overlay import refresh_overlays, save_overlay_record
@@ -403,6 +405,61 @@ def _collect_failed(market: str, sym: str, e: Exception, failed: list[str],
         raise LabError(f"collect aborted after {streak} consecutive symbol failures (last "
                        f"{sym}: {type(e).__name__}{code})") from e
     return streak
+
+
+def _daily_job_lock() -> Path:
+    return data_root() / "logs" / ".lock"
+
+
+def _wait_for_daily_job() -> None:
+    """The daily job holds data/logs/.lock while it runs: stay off the API until it is done."""
+    while _daily_job_lock().exists():
+        time.sleep(30)
+
+
+def collect_minute(market: str, limit: int | None = None) -> dict:
+    """1-minute bars back to the market's minute_start for the daily universe symbols
+    (top lab.universe_top_n on any day since then, plus always_include), most universe days
+    first. Resumable; `limit` keeps the first N symbols. Skips stock-not-found symbols;
+    MAX_CONSECUTIVE_FAILURES in a row (or a Toss 401/403) abort."""
+    _check_market(market)
+    mc = load_market_raw(market)
+    if mc.minute_start is None:
+        raise LabError(f"{market} has no minute_start in its config")
+    today = market_today(market)
+    syms = minute_symbols(market, mc.minute_start, today.date(), load_lab().universe_top_n)
+    if limit is not None:
+        syms = syms[:limit]
+    client = _client()
+    out = {"symbols": len(syms), "added": 0, "complete": 0, "not_found": 0, "failed": 0}
+    failed: list[str] = []
+    streak = 0
+    try:
+        for sym in syms:
+            _wait_for_daily_job()
+            try:
+                rep = collect_minutes(client, market, sym, mc.minute_start, today)
+                out["added"] += rep.added
+                out["complete"] += int(rep.complete)
+                streak = 0
+            except TossApiError as e:
+                if e.status == 404 and e.code == "stock-not-found":
+                    out["not_found"] += 1
+                    streak = 0
+                elif e.status in SYSTEMIC_STATUS:
+                    raise LabError(f"collect-minute aborted at {sym}: "
+                                   f"{SYSTEMIC_STATUS[e.status]} (Toss API status={e.status} "
+                                   f"code={e.code})") from e
+                else:
+                    streak = _collect_failed(market, sym, e, failed, streak)
+            except (LabError, KeyboardInterrupt):
+                raise
+            except Exception as e:      # noqa: BLE001 - messages carry no secrets
+                streak = _collect_failed(market, sym, e, failed, streak)
+    except httpx.HTTPError as e:
+        raise LabError(f"collect-minute failed: network error ({type(e).__name__})") from e
+    out["failed"] = len(failed)
+    return out
 
 
 def collect(market: str, since: date | None = None, limit: int | None = None) -> dict:

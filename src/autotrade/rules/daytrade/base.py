@@ -9,7 +9,6 @@ from __future__ import annotations
 import pandas as pd
 
 from autotrade.rules.base import BaseRule
-from autotrade.screen.intraday import CANDIDATE_COLUMNS
 from autotrade.types import Panel
 
 DAY_SYMBOL = ["day", "symbol"]
@@ -44,5 +43,12 @@ class IntradayRule(BaseRule):
         return cls.day_features is not IntradayRule.day_features
 
 
+def candidate_frame(rows: list[dict] | None = None) -> pd.DataFrame:
+    """Rows -> a CANDIDATE_COLUMNS frame. The import is lazy: `autotrade.screen` imports the
+    registry, which imports the rule modules (import cycle otherwise)."""
+    from autotrade.screen.intraday import CANDIDATE_COLUMNS
+    return pd.DataFrame(rows or [], columns=CANDIDATE_COLUMNS)
+
+
 def empty_candidates() -> pd.DataFrame:
-    return pd.DataFrame(columns=CANDIDATE_COLUMNS)
+    return candidate_frame()

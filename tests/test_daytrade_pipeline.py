@@ -17,7 +17,16 @@ from autotrade.validate.experiments import ExperimentLog
 from tests.fixtures import make_panel
 
 SYMBOLS = ["069500", "A01", "A02", "A03"]
-MINUTE_DAYS = pd.bdate_range("2023-01-02", periods=60)
+def _kr_sessions(start, n):
+    """The first `n` KRX sessions from `start` (holidays skipped; none of them a special day)."""
+    from autotrade.data.sessions import sessions
+    days = sessions("kr", start, pd.Timestamp(start) + pd.Timedelta(days=2 * n + 30))
+    hours = days["open"].dt.strftime("%H:%M") + days["close"].dt.strftime("%H:%M")
+    assert (hours.iloc[:n] == "09:0015:30").all()
+    return pd.DatetimeIndex(days.index[:n])
+
+
+MINUTE_DAYS = _kr_sessions("2023-01-03", 60)      # 2023-01-02 opened at 10:00
 SCALE = 80.0
 
 
@@ -359,3 +368,11 @@ def test_screen_and_validate_refuse_while_the_collector_runs(env):
             pipeline.validate("daytrade", "kr", 3)
     pipeline.validate("daytrade", "kr", 3)                 # lock released: allowed again
 
+
+
+def test_session_rules_cut_entries_at_each_days_auction_start():
+    from autotrade.config import load_market_raw
+    kr = pipeline._session_rules(load_market_raw("kr"))
+    us = pipeline._session_rules(load_market_raw("us"))
+    assert kr.last_entry_lead == 10 and kr.vi is not None and kr.exit_lead_minutes == 0
+    assert us.last_entry_lead is None and us.exit_lead_minutes == 0

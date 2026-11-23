@@ -12,6 +12,13 @@ always_include: ["069500", "102110"]
 session_open: "09:00"
 session_close: "15:30"
 closing_auction_start: "15:20"
+# per-day sessions (Jan-2 10:00 opens, exam days 10:00-16:30) from exchange_calendars
+exchange_calendar: XKRX
+# days exchange_calendars 4.13.3 gets wrong, local "HH:MM" open / close:
+# 2026-11-19 = 2027 CSAT exam day (KRX: opens 10:00, closes 16:30); confirmed 2026-11-24 in the
+# stored 069500 minute bars (first bar ends 10:01, auction bar 16:30); the package has 09:00-15:30
+session_overrides:
+  2026-11-19: ["10:00", "16:30"]
 exclude_name_keywords: ["레버리지", "인버스", "2X", "스팩"]
 delisted_supplement: true
 fractional_orders: false

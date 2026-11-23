@@ -1,6 +1,7 @@
 """Gap and KR opening-overreaction families (spec 7.5 #4, #5).
 
-Bars are END-stamped. The day open is the open of the day's first bar; the gap is
+Bars are END-stamped; minute windows start at the day's ACTUAL session open
+(data/sessions.py: 10:00 on KR late-open days). The day open is the open of the day's first bar; the gap is
 `open / prev_close - 1` with prev_close = `daily.close.shift(1)` (strictly before day d, as the
 panel includes d's own row). The signal bar of `confirm` minutes is the last bar ending at or
 before open + confirm (it must end after the open); the executor fills at the NEXT bar.
@@ -19,8 +20,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from autotrade.config import load_market_raw
-from autotrade.rules.daytrade._bars import _day_slices, _last_at_or_before, _market_of, _open_ts
+from autotrade.rules.daytrade._bars import _last_at_or_before, _market_of, _session_days
 from autotrade.rules.daytrade.base import DAY_SYMBOL, IntradayRule, candidate_frame, empty_candidates
 from autotrade.types import Panel
 
@@ -44,17 +44,16 @@ def _scan_days(symbol, bars, days, daily, minutes, build, market_only=None):
     market = _market_of(bars)
     if market_only is not None and market != market_only:
         return empty_candidates()
-    sess = load_market_raw(market).session_open
     prev = daily.close[symbol].shift(1)
     want = set(pd.DatetimeIndex(days))
     rows = []
-    for d, db in _day_slices(bars):
+    for d, db, sess in _session_days(bars):
         if d not in want:
             continue
         pc = prev.get(d, np.nan)
         if not np.isfinite(pc) or pc <= 0:
             continue
-        sig = _signal_bar(db, _open_ts(d, sess, bars.index.tz), minutes)
+        sig = _signal_bar(db, sess["open"], minutes)
         if sig is None:
             continue
         row = build(d, db, sig, pc)
@@ -135,10 +134,9 @@ class OpenReversal(IntradayRule):
         if bars.empty:
             return pd.DataFrame(columns=cols, index=pd.DatetimeIndex([], name="day"))
         market = _market_of(bars)
-        sess = load_market_raw(market).session_open
         days, vols = [], []
-        for d, db in _day_slices(bars):
-            o = _open_ts(d, sess, bars.index.tz)
+        for d, db, sess in _session_days(bars):
+            o = sess["open"]
             first = db[(db.index > o) & (db.index <= o + pd.Timedelta(minutes=FIRST_MINUTES))]
             days.append(d)
             vols.append(float(first["volume"].sum()) if len(first) else np.nan)

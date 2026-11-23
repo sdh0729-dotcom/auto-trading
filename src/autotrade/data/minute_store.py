@@ -1,7 +1,7 @@
 """Month-partitioned 1-minute bar store. Timestamps are bar END times, tz-aware (market tz)."""
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -22,19 +22,14 @@ def _empty(market: Market) -> pd.DataFrame:
                         dtype=float)
 
 
-def _parse(s: str) -> time:
-    h, m = s.split(":")
-    return time(int(h), int(m))
-
-
 def regular_session(df: pd.DataFrame, market_cfg) -> pd.DataFrame:
-    """Keep bars whose local end time t satisfies session_open < t <= session_close."""
+    """Keep bars whose END time lies in their local day's regular session, open < ts <= close,
+    with the day's ACTUAL hours (data/sessions.py: late opens, exam days, half-days); bars of
+    a day that is not a session are dropped."""
     if df.empty:
         return df
-    local = df.index.tz_convert(TZ[market_cfg.market])
-    t = pd.Index(local.time)
-    keep = (t > _parse(market_cfg.session_open)) & (t <= _parse(market_cfg.session_close))
-    return df[keep]
+    from autotrade.data.sessions import session_mask
+    return df[session_mask(df.index, market_cfg.market, market_cfg)]
 
 
 def save_minutes(market: Market, symbol: str, df: pd.DataFrame,

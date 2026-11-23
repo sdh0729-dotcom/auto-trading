@@ -17,6 +17,8 @@ benchmark: SPY    # S&P 500
 etf_leverage_required: true
 session_open: "09:30"
 session_close: "16:00"
+# per-day sessions (13:00 half-days) from exchange_calendars
+exchange_calendar: XNYS
 minute_start: 2021-12-01
 # ORB stocks-in-play ATR floor (paper: ATR > $0.50)
 orb_min_atr: 0.50

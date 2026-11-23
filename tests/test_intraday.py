@@ -31,8 +31,9 @@ def cands(*rows):
     return pd.DataFrame(list(rows), columns=CANDIDATE_COLUMNS)
 
 
-KR_RULES = SessionRules(last_entry="15:20", exit_lead_minutes=0, vi=None)
-D = "2024-01-02"
+# KR: no entry bar ending after the closing-auction start (close - 10 min: 15:20 / 16:20)
+KR_RULES = SessionRules(last_entry_lead=10, exit_lead_minutes=0, vi=None)
+D = "2024-01-03"           # a regular 09:00-15:30 day (2024-01-02 opened at 10:00)
 
 
 def test_entry_is_next_bar_open_never_the_signal_bar():
@@ -105,6 +106,46 @@ def test_half_day_exits_at_last_bar():
     assert r.exit_price == 111 and r.exit_reason == "session_end"
 
 
+def test_us_half_day_post_market_bars_never_used():
+    d = "2024-11-29"                       # NYSE closes 13:00; Toss still has 13:01-16:00
+    b = bars(d, [flat("09:31"), flat("09:32"), flat("12:00", 99), flat("12:30"),
+                 ("13:00", 100, 100, 100, 111),
+                 ("13:01", 50, 50, 50, 50), flat("15:30", 130), flat("16:00", 140)], US)
+    us = SessionRules(None, 0, None)
+    r = execute("A", b, cands(cand(d, "09:31", tz=US)), us).iloc[0]
+    assert r.exit_reason == "session_end" and r.exit_price == 111     # no post-market stop
+    assert r.exit_date == pd.Timestamp(f"{d} 13:00", tz=US)
+    for sig in ("13:00", "15:30"):         # the next bar would be post-market: no fill
+        assert execute("A", b, cands(cand(d, sig, tz=US)), us).empty
+    lead = execute("A", b, cands(cand(d, "09:31", tz=US)), SessionRules(None, 60, None))
+    assert lead.iloc[0].exit_date == pd.Timestamp(f"{d} 12:00", tz=US)   # close - 1 h
+
+
+def test_kr_exam_day_auction_exit_and_last_entry():
+    d = "2024-11-14"                       # CSAT day: 10:00-16:30, auction from 16:20
+    b = bars(d, [flat("10:01"), flat("15:30", 101), flat("16:19"), flat("16:20"),
+                 flat("16:21"), ("16:30", 100, 100, 100, 105)])
+    r = execute("A", b, cands(cand(d, "10:01")), KR_RULES).iloc[0]
+    assert r.exit_reason == "session_end" and r.exit_price == 105
+    assert r.exit_date == pd.Timestamp(f"{d} 16:30", tz=KR)
+    ok = execute("A", b, cands(cand(d, "16:19")), KR_RULES)
+    assert len(ok) == 1 and ok.iloc[0].entry_date == pd.Timestamp(f"{d} 16:20", tz=KR)
+    assert execute("A", b, cands(cand(d, "16:20")), KR_RULES).empty
+
+
+def test_kr_late_open_bars_before_the_open_never_fill():
+    d = "2025-01-02"                       # opens 10:00; padded bars before it are no trades
+    b = bars(d, [flat("09:01"), flat("09:02", 90), flat("10:01", 101), flat("15:30", 102)])
+    r = execute("A", b, cands(cand(d, "09:01")), KR_RULES).iloc[0]
+    assert r.entry_date == pd.Timestamp(f"{d} 10:01", tz=KR) and r.entry_price == 101
+
+
+def test_no_trade_on_a_non_session_day():
+    d = "2024-01-01"                       # KRX holiday
+    b = bars(d, [flat("09:01"), flat("09:02"), flat("15:30")])
+    assert execute("A", b, cands(cand(d, "09:01")), KR_RULES).empty
+
+
 def test_no_entry_after_last_entry_kr():
     b = bars(D, [flat("15:19"), flat("15:20"), flat("15:21"), flat("15:30", 101)])
     ok = execute("A", b, cands(cand(D, "15:19")), KR_RULES)
@@ -134,13 +175,13 @@ def test_overlapping_candidates_dropped():
 
 
 def test_multiple_days_and_edge_cases():
-    d2 = "2024-01-03"
+    d2 = "2024-01-04"
     b = pd.concat([bars(D, [flat("09:01"), flat("09:02"), flat("15:30")]),
                    bars(d2, [flat("09:01"), flat("09:02"), flat("15:30")])])
-    c = cands(cand(D, "09:01"), cand(d2, "09:01"), cand("2024-01-04", "09:01"),
+    c = cands(cand(D, "09:01"), cand(d2, "09:01"), cand("2024-01-05", "09:01"),
               cand(D, "15:30"))
     t = execute("A", b, c, KR_RULES)
-    assert len(t) == 2 and t.exit_date.dt.day.tolist() == [2, 3]
+    assert len(t) == 2 and t.exit_date.dt.day.tolist() == [3, 4]
     assert execute("A", b, cands(), KR_RULES).empty
     bad = cands(cand(D, "09:01"))
     bad["day"] = pd.Timestamp(d2)
@@ -150,7 +191,7 @@ def test_multiple_days_and_edge_cases():
 
 VI = VIConfig(static_pct=0.10, dynamic_pct_kospi200=0.03, dynamic_pct_other=0.06,
               halt_minutes=2, etf_exempt=True)
-VI_RULES = SessionRules(last_entry="15:20", exit_lead_minutes=0, vi=VI)
+VI_RULES = SessionRules(last_entry_lead=10, exit_lead_minutes=0, vi=VI)
 
 
 def test_exit_ts_at_session_exit_bar_is_session_end():
@@ -161,7 +202,7 @@ def test_exit_ts_at_session_exit_bar_is_session_end():
 
 
 def test_execute_many_days_matches_per_day():
-    days = ["2024-01-02", "2024-01-03", "2024-01-04"]
+    days = ["2024-01-03", "2024-01-04", "2024-01-05"]
     b = pd.concat([bars(d, [flat("09:01"), flat("09:02"), ("15:30", 100, 100, 100, 100 + i)])
                    for i, d in enumerate(days)])
     t = execute("A", b, cands(*[cand(d, "09:01") for d in days]), KR_RULES)
@@ -242,7 +283,7 @@ def test_etf_never_halts_and_no_vi_without_inputs():
         assert execute("A", b, c, VI_RULES, **kw).iloc[0].exit_date == t4
     assert execute("A", b, c, KR_RULES, prev_close=100.0).iloc[0].exit_date == t4
     # per-day series: a day missing from it has no VI
-    ser = pd.Series({pd.Timestamp("2024-01-03"): 100.0})
+    ser = pd.Series({pd.Timestamp("2024-01-04"): 100.0})
     assert execute("A", b, c, VI_RULES, prev_close=ser).iloc[0].exit_date == t4
     ser = pd.Series({pd.Timestamp(D): 100.0})
     r = execute("A", b, c, VI_RULES, prev_close=ser).iloc[0]

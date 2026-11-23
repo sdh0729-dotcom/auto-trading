@@ -8,7 +8,24 @@ from autotrade.types import Panel
 from tests.fixtures import make_panel
 
 TZ = "America/New_York"
-DAYS = pd.bdate_range("2024-01-02", periods=30)
+
+
+def _regular_days(n, start="2024-01-02"):
+    """The first `n` days from `start` that are regular sessions on BOTH exchanges (KR
+    09:00-15:30, US 09:30-16:00): synthetic bars use the usual clock hours, and holidays /
+    late opens / half-days would drop or move them (data/sessions.py)."""
+    from autotrade.data.sessions import sessions
+    end = pd.Timestamp(start) + pd.Timedelta(days=3 * n + 30)
+    kr, us = sessions("kr", start, end), sessions("us", start, end)
+
+    def hours(t):
+        return t.dt.strftime("%H:%M")
+    kr = kr.index[(hours(kr["open"]) == "09:00") & (hours(kr["close"]) == "15:30")]
+    us = us.index[(hours(us["open"]) == "09:30") & (hours(us["close"]) == "16:00")]
+    return pd.DatetimeIndex(kr.intersection(us)[:n])
+
+
+DAYS = _regular_days(30)
 
 
 def day_bars(day, base=100.0, first_up=True, v5=1000.0, breakout_at="09:50", n=60):
@@ -351,3 +368,66 @@ def test_gap_families_registered_with_documented_grids():
     assert DAYTRADE_FAMILIES["gap_go"] is GapGo and DAYTRADE_FAMILIES["gap_fade"] is GapFade
     assert DAYTRADE_FAMILIES["kr_open_rev"] is OpenReversal
     assert len(GapGo.grid()) == 4 and len(GapFade.grid()) == 8 and len(OpenReversal.grid()) == 8
+
+
+# ---- per-day sessions: late opens, exam days, half-days (data/sessions.py) ----
+
+def _special_panel(symbols, day, prev=100.0, products=None):
+    p = make_panel(60, symbols, seed=3, start=f"{pd.Timestamp(day) - pd.Timedelta(days=50):%Y-%m-%d}",
+                   products=products)
+    assert pd.Timestamp(day) in p.close.index
+    for s in symbols:
+        p.close[s] = prev
+    return p
+
+
+def test_close_mom_us_half_day_signals_before_the_1300_close():
+    from autotrade.data.minute_store import regular_session
+    from autotrade.config import load_market_raw
+    from autotrade.rules.daytrade.momentum import CloseMomentum, IntradayMomentum
+    d = pd.Timestamp("2024-11-29")                  # NYSE closes 13:00; Toss has bars to 20:00
+    days = pd.DatetimeIndex([d])
+    panel = _special_panel(["SPY"], d, products={"SPY": "etf"})
+    raw = _mom_bars(d, TZ, "04:01", 959, lambda e: np.full(len(e), 101.0))    # 04:01..19:59
+    mom = CloseMomentum({"direction": "momentum", "min_move": 0.0})
+    for bars in (raw, regular_session(raw, load_market_raw("us"))):
+        c = mom.candidates("SPY", bars, days, panel)
+        assert c.iloc[0]["signal_ts"] == pd.Timestamp("2024-11-29 12:30", tz=TZ)   # close - 30
+        assert pd.isna(c.iloc[0]["exit_ts"])
+        i = IntradayMomentum({"threshold": 0.0}).candidates("SPY", bars, days, panel)
+        assert i.iloc[0]["signal_ts"] == pd.Timestamp("2024-11-29 12:30", tz=TZ)
+    # no post-market bar is ever a signal: a post-market-only rally is not seen
+    post = _mom_bars(d, TZ, "04:01", 959,
+                     lambda e: np.where(e > pd.Timestamp("2024-11-29 13:00", tz=TZ), 101.0, 99.0))
+    assert mom.candidates("SPY", post, days, panel).empty
+
+
+def test_intraday_mom_kr_exam_day_times_follow_the_late_session():
+    from autotrade.rules.daytrade.momentum import IntradayMomentum
+    d = pd.Timestamp("2024-11-14")                  # CSAT: 10:00-16:30, auction from 16:20
+    days = pd.DatetimeIndex([d])
+    panel = _special_panel(["069500"], d, products={"069500": "etf"})
+    # 101 through the bar ending 10:30 (open + 30), 99 afterwards; 09:01-09:59 padded at 90
+    bars = _mom_bars(d, KR_TZ, "09:01", 450,
+                     lambda e: np.where(e <= pd.Timestamp("2024-11-14 10:00", tz=KR_TZ), 90.0,
+                                        np.where(e <= pd.Timestamp("2024-11-14 10:30", tz=KR_TZ),
+                                                 101.0, 99.0)))
+    c = IntradayMomentum({"threshold": 0.005}).candidates("069500", bars, days, panel)
+    assert len(c) == 1
+    assert c.iloc[0]["signal_ts"] == pd.Timestamp("2024-11-14 15:50", tz=KR_TZ)
+    assert c.iloc[0]["exit_ts"] == pd.Timestamp("2024-11-14 16:20", tz=KR_TZ)
+
+
+def test_orb_and_gap_windows_start_at_the_kr_new_year_open():
+    from autotrade.rules.daytrade.gap import GapGo
+    d = pd.Timestamp("2025-01-02")                  # KRX opens 10:00
+    days = pd.DatetimeIndex([d])
+    panel = _special_panel(["005930"], d)
+    rows = [(105.0, 106.0, 104.0, 105.5, 100.0)] * 5 + [(105.5, 108.0, 105.5, 107.0, 100.0)] \
+        + [(107.0, 107.0, 107.0, 107.0, 100.0)] * 60
+    bars = _ohlc_bars(d, KR_TZ, "10:01", rows)
+    c = Orb({"or_minutes": 5, "stop": "or_low", "target_r": np.nan}).candidates(
+        "005930", bars, days, panel)
+    assert len(c) == 1 and c.iloc[0]["signal_ts"] == pd.Timestamp("2025-01-02 10:06", tz=KR_TZ)
+    g = GapGo({"gap": 0.04, "confirm": 5}).candidates("005930", bars, days, panel)
+    assert len(g) == 1 and g.iloc[0]["signal_ts"] == pd.Timestamp("2025-01-02 10:05", tz=KR_TZ)

@@ -15,6 +15,7 @@ dependencies = [
     "pykrx",
     "python-dotenv",
     "setuptools<81",  # pykrx imports pkg_resources
+    "exchange-calendars>=4.13.3",
 ]
 
 [project.optional-dependencies]

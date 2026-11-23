@@ -98,6 +98,10 @@ class MarketConfig:
     orb_min_atr: float | None = None
     orb_min_atr_pct: float | None = None
     vi: VIConfig | None = None        # KR volatility-interruption auctions
+    # per-day regular sessions (data/sessions.py): exchange_calendars code (XKRX / XNYS) and
+    # {date: (open, close)} local "HH:MM" corrections for days the package gets wrong
+    exchange_calendar: str | None = None
+    session_overrides: dict[date, tuple[str, str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +164,13 @@ def load_market_raw(m: Market) -> MarketConfig:
             d["vi"] = VIConfig(**d["vi"])
         except TypeError as e:
             raise ConfigError(f"invalid vi config {m}: {e}") from e
+    if d.get("session_overrides"):
+        try:
+            d["session_overrides"] = {
+                (k if isinstance(k, date) else date.fromisoformat(str(k))): (str(v[0]), str(v[1]))
+                for k, v in d["session_overrides"].items()}
+        except (TypeError, ValueError, IndexError) as e:
+            raise ConfigError(f"invalid session_overrides {m}: {e}") from e
     try:
         return MarketConfig(**d)
     except TypeError as e:

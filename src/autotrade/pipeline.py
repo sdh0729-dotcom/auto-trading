@@ -42,6 +42,7 @@ from autotrade.data.delisted_kr import (KindError, add_delisted_meta, kind_delis
 from autotrade.data.minute_store import minute_bounds, minute_calendar, minute_dir
 from autotrade.data.krx_overlay import refresh_overlays, save_overlay_record
 from autotrade.data.quality import check_daily, hard_issues
+from autotrade.data.sessions import auction_lead_minutes
 from autotrade.data.store import (calendar, data_root, load_bars, load_daily, load_panel,
                                   save_meta, stored_symbols, trading_dates)
 from autotrade.report import (CONFIDENCE_FORMULAS, RuleCard, limitations, write_leaderboard,
@@ -748,9 +749,11 @@ def _screen_table(frames: list[pd.DataFrame]) -> pd.DataFrame:
 
 
 def _session_rules(mc: MarketConfig) -> SessionRules:
-    """Paper-mode session rules: KR stops entering at the closing auction and has VI
-    auctions; US trades to the close. Exits run to the last bar (no early exit lead)."""
-    return SessionRules(last_entry=mc.closing_auction_start, exit_lead_minutes=0, vi=mc.vi)
+    """Paper-mode session rules: KR stops entering at each day's closing-auction start (close
+    - 10 min) and has VI auctions; US trades to the close. Exits run to the day's last
+    regular bar (no early exit lead)."""
+    return SessionRules(last_entry_lead=auction_lead_minutes(mc), exit_lead_minutes=0,
+                        vi=mc.vi)
 
 
 def _minute_universe(market: str) -> list[str]:

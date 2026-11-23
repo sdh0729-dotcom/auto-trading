@@ -10,7 +10,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from autotrade.types import TRADE_COLUMNS, Product, VIConfig
+from autotrade.data.sessions import sessions
+from autotrade.types import TRADE_COLUMNS, TZ, Product, VIConfig
 
 __all__ = ["CANDIDATE_COLUMNS", "SessionRules", "VIConfig", "execute", "vi_halts"]
 
@@ -19,14 +20,20 @@ CANDIDATE_COLUMNS = ["day", "signal_ts", "stop_pct", "target_pct", "exit_ts", "c
 
 @dataclass(frozen=True)
 class SessionRules:
-    last_entry: str | None      # local "HH:MM" bar-END time; entry bar must end at or before it
-    exit_lead_minutes: int      # session exit = last bar ending <= last bar end - lead
-    vi: VIConfig | None = None  # KR volatility-interruption auctions; None = no VI
+    """Times relative to each day's ACTUAL session (data/sessions.py), so late opens, KR exam
+    days (close 16:30) and US half-days (close 13:00) get their own cut-offs."""
+    last_entry_lead: int | None  # entry bar must end <= the day's close - this many minutes
+                                 # (KR 10 = closing-auction start: 15:20, 16:20 on exam days)
+    exit_lead_minutes: int       # session exit = last bar ending <= the day's close - lead
+    vi: VIConfig | None = None   # KR volatility-interruption auctions; None = no VI
 
 
-def _minutes(hhmm: str) -> int:
-    h, m = hhmm.split(":")
-    return int(h) * 60 + int(m)
+def _market_of_tz(tz) -> str:
+    name = str(tz)
+    for m, z in TZ.items():
+        if z == name:
+            return m
+    raise ValueError(f"unknown bar timezone {name}")
 
 
 _EPS = 1e-12
@@ -118,6 +125,12 @@ def execute(symbol: str, bars: pd.DataFrame, cands: pd.DataFrame, rules: Session
             product: Product = "stock") -> pd.DataFrame:
     """Turn day-trade candidates into same-day trades on END-stamped 1-minute bars.
 
+    Only bars inside the day's actual session (open < end <= close, data/sessions.py; the
+    market follows the bars' timezone) are used: a day that is not a session has no trades,
+    pre-open and post-close bars never fill. The session exit is the last bar ending at or
+    before close - exit_lead_minutes; entries need an entry bar ending at or before
+    close - last_entry_lead.
+
     VI (only when rules.vi is set, product is not an exempt ETF and a previous close is
     known): `prev_close` is a float (applies to every day) or a Series indexed by LOCAL
     day (tz-naive midnight Timestamps) with the previous daily close; a day missing from
@@ -132,21 +145,33 @@ def execute(symbol: str, bars: pd.DataFrame, cands: pd.DataFrame, rules: Session
         ends_all = idx.as_unit("ns").asi8
         day_all = idx.normalize().tz_localize(None).as_unit("ns").asi8
         O, H, L, C = (bars[k].to_numpy(float) for k in ("open", "high", "low", "close"))
+        cday = pd.DatetimeIndex(cands["day"]).normalize()
+        sess = sessions(_market_of_tz(idx.tz), cday.min(), cday.max())
         lead = pd.Timedelta(minutes=rules.exit_lead_minutes).value
+        entry_lead = (pd.Timedelta(minutes=rules.last_entry_lead).value
+                      if rules.last_entry_lead is not None else None)
         vi = rules.vi
         vi_on = vi is not None and prev_close is not None and not (
             product == "etf" and vi.etf_exempt)
         dyn = vi.dynamic_pct_other if (vi_on and dynamic_pct is None) else dynamic_pct
         cands = cands.sort_values("signal_ts", kind="stable")
-        last_entry = _minutes(rules.last_entry) if rules.last_entry else None
         for day, group in cands.groupby(cands["day"].dt.normalize(), sort=True):
+            if day not in sess.index:
+                continue                    # not a session: no regular bars
+            s_open = sess.at[day, "open"].value
+            s_close = sess.at[day, "close"].value
             lo = int(np.searchsorted(day_all, day.value, side="left"))
             hi = int(np.searchsorted(day_all, day.value, side="right"))
+            lo += int(np.searchsorted(ends_all[lo:hi], s_open, side="right"))
+            hi = lo + int(np.searchsorted(ends_all[lo:hi], s_close, side="right"))
             if hi == lo:
                 continue
             ts = idx[lo:hi]
             o, h, l, c, ends = O[lo:hi], H[lo:hi], L[lo:hi], C[lo:hi], ends_all[lo:hi]
-            i_end = int(np.searchsorted(ends, ends[-1] - lead, side="right")) - 1
+            i_end = int(np.searchsorted(ends, s_close - lead, side="right")) - 1
+            if i_end < 0:
+                continue
+            last_entry = s_close - entry_lead if entry_lead is not None else None
             halted = None
             if vi_on:
                 pc = prev_close.get(day) if isinstance(prev_close, pd.Series) else prev_close
@@ -166,10 +191,8 @@ def execute(symbol: str, bars: pd.DataFrame, cands: pd.DataFrame, rules: Session
                         i0 += 1
                 if i0 >= len(ts) or i0 > i_end:
                     continue
-                if last_entry is not None:
-                    t = ts[i0]
-                    if t.hour * 60 + t.minute > last_entry:
-                        continue
+                if last_entry is not None and ends[i0] > last_entry:
+                    continue
                 i_sig = None
                 if pd.notna(r.exit_ts):
                     i_sig = max(int(np.searchsorted(ends, pd.Timestamp(r.exit_ts).value,

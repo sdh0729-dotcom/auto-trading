@@ -1,8 +1,11 @@
 """Momentum families (spec 7.5 #6, #8): intraday momentum and close momentum/reversal.
 
-Bars are END-stamped. Both families signal at a late-session bar (KR 14:50, US 15:30 ET) and
-hold to the close: KR exits at the bar ending 15:20 (last continuous-session bar before the
-closing auction, via `exit_ts`), US at session end (`exit_ts` NaT).
+Bars are END-stamped. Times follow each day's ACTUAL session (data/sessions.py). Both families
+signal at the bar ending `SIGNAL_LEAD` minutes before the end of continuous trading (KR: the
+closing-auction start, 15:20 -> signal 14:50; 16:20 -> 15:50 on exam days; US: the close,
+16:00 -> 15:30 ET, 13:00 -> 12:30 on half-days) and hold to the close: KR exits at the bar
+ending at the auction start (via `exit_ts`), US at session end (`exit_ts` NaT). The first 30
+minutes run from the day's actual open.
 
 Lab choices (not in the spec): a protective stop of `STOP_PCT` = 2% of the entry for both
 families (a crash exit only; the time exit is the real exit; not in the grid so it does not
@@ -24,13 +27,13 @@ import pandas as pd
 
 from autotrade.config import load_market_raw
 from autotrade.rules.daytrade.base import DAY_SYMBOL, IntradayRule, candidate_frame, empty_candidates
-from autotrade.rules.daytrade._bars import _day_slices, _last_at_or_before, _market_of, _open_ts
+from autotrade.rules.daytrade._bars import (_continuous_end, _day_slices, _last_at_or_before,
+                                           _market_of, _session_days)
 from autotrade.types import Panel
 
 STOP_PCT = 0.02
 FIRST_MINUTES = 30
-SIGNAL_TIME = {"kr": "14:50", "us": "15:30"}
-KR_EXIT_TIME = "15:20"
+SIGNAL_LEAD = 30        # minutes before the end of continuous trading (the last 30 minutes)
 CONF_SCALE = 0.01
 
 
@@ -70,31 +73,29 @@ class _Momentum(IntradayRule):
         if bars.empty or not len(days) or symbol not in daily.close.columns:
             return empty_candidates()
         market = _market_of(bars)
-        sess = load_market_raw(market).session_open
         prev = daily.close[symbol].shift(1)
         want = set(pd.DatetimeIndex(days))
         rows = []
-        for d, db in _day_slices(bars):
+        for d, db, sess in _session_days(bars):
             if d not in want:
                 continue
             pc = prev.get(d, np.nan)
             if not np.isfinite(pc) or pc <= 0:
                 continue
-            o = _open_ts(d, sess, bars.index.tz)
+            o = sess["open"]
             first = _last_at_or_before(db, o + pd.Timedelta(minutes=FIRST_MINUTES))
             if first is None or not first.index[0] > o:
                 r30 = np.nan
             else:
                 r30 = float(first["close"].iloc[0]) / pc - 1.0
-            sig_target = pd.Timestamp(f"{d:%Y-%m-%d} {SIGNAL_TIME[market]}", tz=bars.index.tz)
-            sig = _last_at_or_before(db, sig_target)
-            if sig is None:
+            end = _continuous_end(sess)
+            sig = _last_at_or_before(db, end - pd.Timedelta(minutes=SIGNAL_LEAD))
+            if sig is None or not sig.index[0] > o:
                 continue
             ret = float(sig["close"].iloc[0]) / pc - 1.0
             if not accept(r30, ret):
                 continue
-            exit_ts = (pd.Timestamp(f"{d:%Y-%m-%d} {KR_EXIT_TIME}", tz=bars.index.tz)
-                       if market == "kr" else pd.NaT)
+            exit_ts = end if market == "kr" else pd.NaT
             move = r30 if self._uses_first30 else ret
             rows.append(_row(d, sig.index[0], move, market, exit_ts))
         return candidate_frame(rows)

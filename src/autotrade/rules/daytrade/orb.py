@@ -1,7 +1,8 @@
 """Opening-range breakout families (spec 7.5 #0, #1).
 
 Bars are END-stamped. The opening range of `or_minutes` is made of the bars ending in
-(open, open + or_minutes]; it is complete only at the bar ending open + or_minutes, so a
+(open, open + or_minutes], with the day's ACTUAL open (data/sessions.py: 10:00 on KR late-open
+days); it is complete only at the bar ending open + or_minutes, so a
 breakout signal is a LATER bar whose high exceeds the range high (strictly). The executor
 enters at the next bar's open.
 
@@ -20,7 +21,7 @@ import pandas as pd
 
 from autotrade.config import load_market_raw
 from autotrade.rules.daytrade.base import DAY_SYMBOL, IntradayRule, candidate_frame, empty_candidates
-from autotrade.rules.daytrade._bars import _day_slices, _market_of, _open_ts
+from autotrade.rules.daytrade._bars import _market_of, _session_days
 from autotrade.rules.indicators import atr
 from autotrade.types import Panel
 
@@ -75,10 +76,9 @@ class OrbStocksInPlay(IntradayRule):
         if bars.empty:
             return pd.DataFrame(columns=cols, index=pd.DatetimeIndex([], name="day"))
         market = _market_of(bars)
-        sess = load_market_raw(market).session_open
         days, rows = [], []
-        for d, db in _day_slices(bars):
-            o = _open_ts(d, sess, bars.index.tz)
+        for d, db, sess in _session_days(bars):
+            o = sess["open"]
             rng = db[(db.index > o) & (db.index <= o + pd.Timedelta(minutes=FIRST_MINUTES))]
             full = (o + pd.Timedelta(minutes=FIRST_MINUTES)) in db.index
             up = bool(full and rng["close"].iloc[-1] > rng["open"].iloc[0])
@@ -125,14 +125,13 @@ class OrbStocksInPlay(IntradayRule):
                    daily: Panel) -> pd.DataFrame:
         if bars.empty or not len(days):
             return empty_candidates()
-        sess = load_market_raw(_market_of(bars)).session_open
         a = _prior_atr(daily, symbol)
         want = set(pd.DatetimeIndex(days))
         rows = []
-        for d, db in _day_slices(bars):
+        for d, db, sess in _session_days(bars):
             if d not in want:
                 continue
-            o = _open_ts(d, sess, bars.index.tz)
+            o = sess["open"]
             r = _opening_range(db, o, self.params["or_minutes"])
             atr_d = a.get(d, np.nan)
             if r is None or not r[2] or not np.isfinite(atr_d):
@@ -162,15 +161,14 @@ class Orb(IntradayRule):
                    daily: Panel) -> pd.DataFrame:
         if bars.empty or not len(days):
             return empty_candidates()
-        sess = load_market_raw(_market_of(bars)).session_open
         a = _prior_atr(daily, symbol)
         want = set(pd.DatetimeIndex(days))
         stop_k, target_r = self.params["stop"], self.params["target_r"]
         rows = []
-        for d, db in _day_slices(bars):
+        for d, db, sess in _session_days(bars):
             if d not in want:
                 continue
-            o = _open_ts(d, sess, bars.index.tz)
+            o = sess["open"]
             end = o + pd.Timedelta(minutes=self.params["or_minutes"])
             r = _opening_range(db, o, self.params["or_minutes"])
             if r is None:

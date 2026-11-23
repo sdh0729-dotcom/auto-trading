@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from autotrade.data.sessions import sessions
 from autotrade.types import TZ
 
 
@@ -22,8 +23,23 @@ def _day_slices(bars: pd.DataFrame):
         yield pd.Timestamp(d), bars.iloc[idx]
 
 
-def _open_ts(day: pd.Timestamp, session_open: str, tz) -> pd.Timestamp:
-    return pd.Timestamp(f"{day:%Y-%m-%d} {session_open}", tz=tz)
+def _session_days(bars: pd.DataFrame):
+    """(local day, bars of that day, session) for the days of END-stamped tz-aware bars that
+    are exchange sessions; `session` has the day's ACTUAL open / close / auction (tz-aware,
+    auction NaT without a closing auction; data/sessions.py), so first-minutes windows start
+    at a late open (KR Jan 2 / exam day 10:00) and close-relative times follow the close."""
+    if bars.empty:
+        return
+    local = bars.index.tz_localize(None).normalize()
+    tab = sessions(_market_of(bars), local.min(), local.max())
+    for d, db in _day_slices(bars):
+        if d in tab.index:
+            yield d, db, tab.loc[d]
+
+
+def _continuous_end(session) -> pd.Timestamp:
+    """End of continuous trading: the closing-auction start (KR) or the close (US)."""
+    return session["auction"] if pd.notna(session["auction"]) else session["close"]
 
 
 def _last_at_or_before(dbars: pd.DataFrame, ts: pd.Timestamp):

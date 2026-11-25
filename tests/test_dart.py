@@ -99,3 +99,31 @@ def test_missing_key_message(monkeypatch, tmp_path):
         make_dart_client_from_env()
     assert ei.value.status == "config"
     assert ei.value.message == "DART_API_KEY missing in .env"
+
+
+def _xml(status, msg="m"):
+    return (f"<result><status>{status}</status><message>{msg}</message></result>").encode()
+
+
+@pytest.mark.parametrize("call", [lambda c: c.document("1"), lambda c: c.corp_codes()])
+def test_xml_020_raises_rate_limited(call):
+    c = client(lambda r: httpx.Response(200, content=_xml("020")))
+    with pytest.raises(DartRateLimited):
+        call(c)
+
+
+@pytest.mark.parametrize("status", ["013", "011"])
+@pytest.mark.parametrize("call", [lambda c: c.document("1"), lambda c: c.corp_codes()])
+def test_xml_other_status_raises_dart_error(call, status):
+    c = client(lambda r: httpx.Response(200, content=_xml(status)))
+    with pytest.raises(DartError) as ei:
+        call(c)
+    assert ei.value.status == status and not isinstance(ei.value, DartRateLimited)
+
+
+def test_json_non_dict_and_bad_total_page():
+    with pytest.raises(DartError):
+        client(lambda r: httpx.Response(200, json=[1])).list_filings("1", D0, D1, "B")
+    c = client(lambda r: httpx.Response(200, json={"status": "000", "total_page": "x", "list": []}))
+    with pytest.raises(DartError):
+        c.list_filings("1", D0, D1, "B")

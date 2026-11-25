@@ -77,6 +77,8 @@ class DartClient:
             body = resp.json()
         except ValueError:
             raise DartError("http", "invalid JSON") from None
+        if not isinstance(body, dict):
+            raise DartError("http", "unexpected JSON body")
         status = str(body.get("status", ""))
         if status not in ("000", "013"):
             self._raise_status(status, str(body.get("message", "")))
@@ -90,19 +92,34 @@ class DartClient:
             if str(body.get("status")) == "013":
                 return rows
             rows.extend(body.get("list") or [])
-            total_page = int(body.get("total_page") or 1)
+            try:
+                total_page = int(body.get("total_page") or 1)
+            except (TypeError, ValueError):
+                raise DartError("http", "bad total_page") from None
             if page >= total_page:
                 return rows
             page += 1
 
-    def corp_codes(self) -> pd.DataFrame:
-        resp = self._get("corpCode.xml", {})
+    def _zip_or_status(self, path: str, params: dict) -> bytes:
+        """Raw zip bytes; DART answers errors with HTTP 200 and an XML status body."""
+        content = self._get(path, params).content
+        if content[:2] == b"PK":
+            return content
         try:
-            with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
-                xml = z.read("CORPCODE.xml")
-            root = ElementTree.fromstring(xml)
+            root = ElementTree.fromstring(content)
+            status = (root.findtext("status") or "").strip()
+            message = (root.findtext("message") or "").strip()
+        except ElementTree.ParseError:
+            raise DartError("http", "unreadable reply") from None
+        self._raise_status(status or "http", message or "unreadable reply")
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def corp_codes(self) -> pd.DataFrame:
+        content = self._zip_or_status("corpCode.xml", {})
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                root = ElementTree.fromstring(z.read("CORPCODE.xml"))
         except (zipfile.BadZipFile, KeyError, ElementTree.ParseError):
-            # an error reply from DART is XML with <status>/<message>, not a zip
             raise DartError("corp_code", "unreadable corpCode.xml reply") from None
         rows = [{"corp_code": (e.findtext("corp_code") or "").strip(),
                  "stock_code": (e.findtext("stock_code") or "").strip(),
@@ -120,8 +137,7 @@ class DartClient:
         return list(body.get("list") or [])
 
     def document(self, rcept_no: str) -> bytes:
-        resp = self._get("document.xml", {"rcept_no": rcept_no})
-        return resp.content
+        return self._zip_or_status("document.xml", {"rcept_no": rcept_no})
 
 
 def make_dart_client_from_env() -> DartClient:

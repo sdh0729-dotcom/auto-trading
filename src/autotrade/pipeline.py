@@ -565,14 +565,12 @@ def collect_events(market: str, limit: int | None = None) -> dict:
     with _exclusive_lock(path, f"`lab collect-events --market {market}` is already running "
                                f"(lock {path}): wait for it to finish"):
         syms = event_targets(market)
-        if limit is not None:
-            syms = syms[:limit]
         meta = load_meta(market)
         delisted = {str(s) for s in meta.index[meta["delisted"].astype(bool)]}
         client = make_dart_client_from_env()
         try:
             return collect_events_kr(client, syms, today=market_today(market).date(),
-                                     delisted=delisted)
+                                     delisted=delisted, limit=limit)
         except httpx.HTTPError as e:
             raise LabError(f"collect-events failed: network error ({type(e).__name__})") from e
 

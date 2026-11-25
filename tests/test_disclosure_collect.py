@@ -11,7 +11,7 @@ from autotrade.data import store
 from autotrade.disclosure import collect_kr
 from autotrade.disclosure.collect_kr import collect_events_kr, event_targets
 from autotrade.disclosure.dart import DartRateLimited
-from autotrade.disclosure.store import (events_root, load_filings, read_json, state_path,
+from autotrade.disclosure.store import (events_root, incomplete_targets, load_filings, read_json, state_path,
                                         targets_path)
 from tests.fixtures import make_panel
 from tests.test_cli import cli_env  # noqa: F401
@@ -123,7 +123,7 @@ def test_targets_exclude_etfs_and_record_coverage(env, monkeypatch):
     collect_events_kr(FakeClient(), ["000001", "000002", "777777"], today=TODAY,
                       delisted={"000002", "777777"})
     assert read_json(targets_path("kr"), {}) == {
-        "targets": 3, "mapped": 2, "delisted_targets": 2, "delisted_mapped": 1,
+        "symbols": ["000001", "000002", "777777"], "targets": 3, "mapped": 2, "delisted_targets": 2, "delisted_mapped": 1,
         "unmapped": ["777777"]}
 
 
@@ -152,6 +152,18 @@ def test_cli_collect_events_runs(cli_env, monkeypatch):  # noqa: F811
     monkeypatch.setattr(pipeline, "event_targets", lambda m: ["000001", "000002"])
     r = CliRunner().invoke(app, ["collect-events", "--market", "kr", "--limit", "1"])
     assert r.exit_code == 0, (r.output, r.exception)
-    assert "symbols 1" in r.output and "filings 1" in r.output
+    assert "symbols 2" in r.output and "filings 1" in r.output
     assert len(load_filings("kr")) == 1
-    assert json.loads(targets_path("kr").read_text())["targets"] == 1
+    assert json.loads(targets_path("kr").read_text())["targets"] == 2
+    assert incomplete_targets("kr") == ["000002"]
+
+
+def test_limit_fetches_subset_but_targets_describe_all(env):
+    out = collect_events_kr(FakeClient(), ["000001", "000002", "999999"], today=TODAY,
+                            limit=1)
+    t = read_json(targets_path("kr"), {})
+    assert (t["targets"], t["mapped"], t["unmapped"]) == (3, 2, ["999999"])
+    assert list(read_json(state_path("kr"), {})) == ["000001"] and out["complete"] == 1
+    assert incomplete_targets("kr") == ["000002"]
+    collect_events_kr(FakeClient(), ["000001", "000002", "999999"], today=TODAY)
+    assert incomplete_targets("kr") == []

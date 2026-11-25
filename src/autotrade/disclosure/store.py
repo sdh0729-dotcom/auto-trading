@@ -64,3 +64,12 @@ def write_json(path: Path, obj) -> None:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def incomplete_targets(market: str) -> list[str]:
+    """Mapped targets not `complete` in state.json (unmapped ones are excluded by contract)."""
+    t = read_json(targets_path(market), {})
+    state = read_json(state_path(market), {})
+    skip = set(t.get("unmapped", []))
+    return [s for s in t.get("symbols", [])
+            if s not in skip and not state.get(s, {}).get("complete")]

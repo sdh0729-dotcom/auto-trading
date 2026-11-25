@@ -1,13 +1,18 @@
-# KR event table, first draft (spec 2026-11-24-disclosure-lab-design.md §6.1).
+# KR event table (spec 2026-11-24-disclosure-lab-design.md §6.1).
 # Patterns are matched (re.search) against the correction-stripped title; first match wins.
-# Drafts: to be finalized against real title frequencies BEFORE any return is seen (§10-1 #6).
+# Finalized 2026-11-25 with the user from title frequencies only (no prices / returns seen):
+# draft rows + 유무상증자 as negative, 주식소각 (+), 자기주식처분 (−), 자사주 신탁계약 해지 (−).
 # Changing this file after screening starts = a new experiment (events_table hash changes).
 repeat_days: 20
 negative_window: 20
 events:
   - {name: withdrawal, direction: 0, match: "철회"}
   - {name: buyback, direction: 1, match: "자기주식취득(신탁계약체결)?결정", size: buyback_krw, size_min: 1.0}
+  - {name: buyback_trust_termination, direction: -1, match: "자기주식취득신탁계약해지결정"}
+  - {name: treasury_disposal, direction: -1, match: "자기주식처분결정"}
+  - {name: share_cancellation, direction: 1, match: "주식소각결정"}
   - {name: supply_contract, direction: 1, match: "단일판매[ㆍ·]?공급계약체결", size: supply_revenue_ratio, size_min: 0.10}
+  - {name: mixed_offering, direction: -1, match: "유무상증자결정"}
   - {name: bonus_issue, direction: 1, match: "무상증자결정"}
   - {name: rights_offering, direction: -1, match: "유상증자결정", size: rights_dilution, size_min: 0.10}
   - {name: convertible_bond, direction: -1, match: "(전환사채권|신주인수권부사채권|교환사채권)발행결정"}

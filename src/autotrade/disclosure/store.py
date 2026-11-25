@@ -50,11 +50,11 @@ def load_filings(market: str) -> pd.DataFrame:
 
 
 def append_filings(market: str, df: pd.DataFrame) -> None:
-    """Add rows (dedupe on filing_id, stored row wins); atomic temp + rename."""
+    """Add rows (dedupe on (filing_id, symbol), stored row wins: tickers sharing a CIK each keep their rows); atomic temp + rename."""
     if df.empty:
         return
     merged = pd.concat([load_filings(market), df[filing_columns(market)]], ignore_index=True)
-    merged = merged.drop_duplicates("filing_id", keep="first").reset_index(drop=True)
+    merged = merged.drop_duplicates(["filing_id", "symbol"], keep="first").reset_index(drop=True)
     write_parquet_atomic(merged, filings_path(market))
 
 

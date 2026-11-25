@@ -12,13 +12,19 @@ edgar.parse_acceptance, assumption A1), form, items ("1.01,9.01" or ""), insider
 
 Insider amounts: only a Form 4 row carries `insider_usd` = sum(shares x price) over code-P
 rows of its accession (NaN otherwise). The amount comes from SEC's quarterly insider data
-sets, which are published only after a quarter ends. So the collection HORIZON is the last day
-of the newest quarter whose data set is available; filings after it are not fetched yet and
-`done_through` = horizon. A symbol is `complete` once it went through the horizon; a later run
-(after SEC publishes the next set) extends it from `done_through`. Per-quarter aggregates
-(accession -> insider_usd) are cached under events_root("us")/insider/ so each set is
-downloaded once. Tickers with the same CIK (share classes): the first target symbol owns the
-filings, the others are marked complete without rows (accession dedupe). Ticker matching
+sets, published only after a quarter ends; the insider HORIZON is the last day of the newest
+quarter whose set is published (404 = not published, probed back up to 8 quarters, remembered
+per run). Per-symbol state is split (ruling R15):
+ - `done_through`: 8-K / 8-K/A / 424B* rows, collected through today (like KR);
+ - `insider_through`: Form 4 rows, collected through the insider horizon. Form 4 rows filed
+   after it are NOT stored yet (a stored row is never updated); a later run stores them, with
+   insider_usd, once their quarter is published.
+`complete` = done_through reached today AND insider_through reached the current horizon.
+A Form 4 whose quarter data cannot be read (any error but 404, or an unpublished quarter
+before the horizon) raises EdgarError: that symbol is not marked complete and no NaN row is
+stored (ruling R14). Per-quarter aggregates (accession -> insider_usd) are cached under
+events_root("us")/insider/. Tickers sharing a CIK (share classes) each get their own rows
+(store dedupe is (filing_id, symbol); one submissions fetch per CIK per run). Ticker matching
 upper-cases and treats "." as "-" ("BRK.B" = "BRK-B").
 """
 from __future__ import annotations
@@ -28,7 +34,7 @@ from datetime import date, timedelta
 import pandas as pd
 
 from autotrade.data.store import write_parquet_atomic
-from autotrade.disclosure.edgar import (EdgarNotFound, EdgarRateLimited, insider_buy_usd,
+from autotrade.disclosure.edgar import (EdgarError, EdgarNotFound, EdgarRateLimited, insider_buy_usd,
                                         parse_acceptance)
 from autotrade.disclosure.store import (FILING_COLUMNS_US, append_filings, events_root,
                                         read_json, state_path, targets_path, write_json)
@@ -63,7 +69,7 @@ class _Insider:
 
     def __init__(self, client):
         self.client = client
-        self.mem: dict[tuple[int, int], pd.Series] = {}
+        self.mem: dict[tuple[int, int], pd.Series | None] = {}   # None = not published (404)
 
     def get(self, y: int, q: int) -> pd.Series | None:
         """None when that quarter's data set is not published."""
@@ -77,6 +83,7 @@ class _Insider:
             try:
                 s = insider_buy_usd(self.client.insider_quarter(y, q))
             except EdgarNotFound:
+                self.mem[(y, q)] = None
                 return None
             write_parquet_atomic(pd.DataFrame({"accession": s.index.astype(str),
                                                "insider_usd": s.to_numpy(dtype=float)}), p)
@@ -92,8 +99,8 @@ class _Insider:
         return None
 
 
-def _rows(raw: list[dict], symbol: str, cik: str, begin: date, horizon: date,
-          insider: _Insider) -> pd.DataFrame:
+def _rows(raw: list[dict], symbol: str, cik: str, begin: date, begin_ins: date, today: date,
+          horizon: date, insider: _Insider) -> pd.DataFrame:
     out = []
     for r in raw:
         form = str(r.get("form") or "").strip()
@@ -103,13 +110,16 @@ def _rows(raw: list[dict], symbol: str, cik: str, begin: date, horizon: date,
             filed = date.fromisoformat(str(r["filingDate"])[:10])
         except (KeyError, ValueError):
             continue
-        if filed < max(begin, DEFAULT_START) or filed > horizon:
-            continue
         usd = float("nan")
         if form == "4":
+            if filed < max(begin_ins, DEFAULT_START) or filed > horizon:
+                continue
             s = insider.get(*_quarter(filed))
-            if s is not None:
-                usd = float(s.get(str(r["accessionNumber"]), float("nan")))
+            if s is None:
+                raise EdgarError("insider", "insider data set missing before the horizon")
+            usd = float(s.get(str(r["accessionNumber"]), float("nan")))
+        elif filed < max(begin, DEFAULT_START) or filed > today:
+            continue
         out.append({"filing_id": str(r["accessionNumber"]), "symbol": symbol, "cik": cik,
                     "filed_date": filed, "accepted_at": parse_acceptance(r.get("acceptanceDateTime")),
                     "form": form,
@@ -146,26 +156,26 @@ def collect_events_us(client, symbols: list[str], start: date = DEFAULT_START,
     try:
         horizon = insider.horizon(today)
         if horizon is None:
-            from autotrade.disclosure.edgar import EdgarError
             raise EdgarError("insider", "no insider data set available")
         out["horizon"] = horizon.isoformat()
-        owner: dict[str, str] = {}
-        for sym in mapped:
-            owner.setdefault(cik_of[_norm(sym)], sym)
+        subs: dict[str, list[dict]] = {}        # one submissions fetch per CIK per run
         for sym in (mapped if limit is None else mapped[:limit]):
             cik = cik_of[_norm(sym)]
             st = state.get(sym, {})
             done = date.fromisoformat(st["done_through"]) if st.get("done_through") else None
-            if st.get("complete") and done is not None and done >= horizon:
+            ins = date.fromisoformat(st["insider_through"]) if st.get("insider_through") else None
+            if (st.get("complete") and done is not None and done >= today
+                    and ins is not None and ins >= horizon):
                 out["complete"] += 1
                 continue
-            if owner[cik] == sym:
-                begin = done or start
-                rows = _rows(client.submissions(cik, since=begin), sym, cik, begin, horizon,
-                             insider)
-                append_filings("us", rows)
-                out["filings"] += len(rows)
-            state[sym] = {"done_through": horizon.isoformat(), "complete": True}
+            begin, begin_ins = done or start, ins or start
+            if cik not in subs:
+                subs[cik] = client.submissions(cik, since=min(begin, begin_ins))
+            rows = _rows(subs[cik], sym, cik, begin, begin_ins, today, horizon, insider)
+            append_filings("us", rows)
+            out["filings"] += len(rows)
+            state[sym] = {"done_through": today.isoformat(),
+                          "insider_through": horizon.isoformat(), "complete": True}
             write_json(state_path("us"), state)
             out["complete"] += 1
     except EdgarRateLimited:

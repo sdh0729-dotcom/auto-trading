@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from autotrade import pipeline
+from autotrade.disclosure import collect_us
 from autotrade.disclosure.collect_us import collect_events_us
 from autotrade.disclosure.edgar import (EdgarClient, EdgarError, EdgarNotFound,
                                         EdgarRateLimited, insider_buy_usd,
@@ -191,15 +192,18 @@ def fake():
         sub("A-10q", "2024-05-01", "2024-05-01T08:30:00.000Z", "10-Q"),
         sub("A-old", "2014-12-31", "2014-12-31T08:30:00.000Z", "8-K", "1.01"),
         sub("A-424", "2024-04-01", "2024-04-01T10:00:00.000Z", "424B5"),
-        sub("A-late", "2024-07-15", "2024-07-15T10:00:00.000Z", "8-K", "1.01"),   # beyond horizon
+        sub("A-late", "2024-07-15", "2024-07-15T10:00:00.000Z", "8-K", "1.01"),   # 8-K: no horizon
+        sub("A-4late", "2024-07-16", "2024-07-16T18:00:00.000Z", "4"),            # beyond horizon
     ]})
 
 
 def test_us_collect_rows_state_and_targets(env):
     c = fake()
     out = collect_events_us(c, ["AAPL", "MSFT", "GOOG", "GOOGL", "ZZZZ"], today=TODAY)
-    df = load_filings("us").set_index("filing_id")
-    assert set(df.index) == {"A-8k", "A-8ka", "A-4", "A-4b", "A-424"}   # forms, start, horizon
+    allrows = load_filings("us")
+    df = allrows[allrows["symbol"] == "AAPL"].set_index("filing_id")
+    assert set(df.loc[["A-8k"]].index) == {"A-8k"}
+    assert set(df.index) == {"A-8k", "A-8ka", "A-4", "A-4b", "A-424", "A-late"}
     assert df.loc["A-8k", "items"] == "1.01,9.01"
     assert df.loc["A-424", "items"] == ""
     assert df.loc["A-8k", "accepted_at"] == pd.Timestamp("2024-02-01 13:30", tz="UTC")
@@ -211,10 +215,11 @@ def test_us_collect_rows_state_and_targets(env):
     assert t["targets"] == 5 and t["mapped"] == 4 and t["unmapped"] == ["ZZZZ"]
     assert t["delisted_targets"] == 5 and t["delisted_mapped"] == 4     # coverage = mapped/all
     st = read_json(state_path("us"), {})
-    assert st["AAPL"] == {"done_through": "2024-06-30", "complete": True}
+    assert st["AAPL"] == {"done_through": "2024-08-20", "insider_through": "2024-06-30",
+                          "complete": True}
     assert out["complete"] == 4 and out["horizon"] == "2024-06-30" and not out["rate_limited"]
     assert incomplete_targets("us") == []
-    # GOOG/GOOGL share a CIK: fetched once
+    # GOOG/GOOGL share a CIK: fetched once per run, rows for each ticker (ruling R16)
     assert c.calls.count("0000000003") == 1
 
 
@@ -231,7 +236,7 @@ def test_us_collect_resume_and_lock(env):
     collect_events_us(c3, ["AAPL"], today=date(2024, 10, 20))
     assert c3.calls == ["0000000001"]
     ids = list(load_filings("us")["filing_id"])
-    assert "A-late" in ids and len(ids) == len(set(ids))
+    assert "A-4late" in ids and len(ids) == len(set(ids))
     # second collector refused
     with pipeline._exclusive_lock(events_root("us") / ".collect.lock", "x"):
         assert pipeline.events_running("us") is True
@@ -249,7 +254,7 @@ def test_us_rate_limit_stops_cleanly_and_limit_describes_all(env):
     out = collect_events_us(c, ["AAPL", "MSFT"], today=TODAY)
     assert out["rate_limited"] is True and out["complete"] == 1
     assert incomplete_targets("us") == ["MSFT"]
-    assert len(load_filings("us")) == 5
+    assert len(load_filings("us")) == 6
     out = collect_events_us(fake(), ["AAPL", "MSFT"], today=TODAY, limit=1)
     assert read_json(targets_path("us"), {})["targets"] == 2
 
@@ -285,3 +290,71 @@ def test_collector_output_feeds_load_events(env):
     assert ev.loc["A-301", "signal_date"] == pd.Timestamp("2024-02-06")
     assert ev.loc["A-4", "event"] == "insider_buy" and ev.loc["A-4", "size"] == 200000.0
     assert bool(ev.loc["A-4", "size_ok"]) is True
+
+
+def shared_fake(**kw):
+    c = FakeEdgar({"0000000003": [
+        sub("G-8k", "2024-02-01", "2024-02-01T08:30:00.000Z", "8-K", "1.01")]}, **kw)
+    return c
+
+
+def test_shared_cik_tickers_each_get_rows_and_events(env):
+    c = shared_fake()
+    collect_events_us(c, ["GOOG", "GOOGL"], today=TODAY)
+    assert c.calls == ["0000000003"]
+    df = load_filings("us")
+    assert sorted(df["symbol"]) == ["GOOG", "GOOGL"]
+    ev = load_events("us", CAL)
+    assert sorted(ev["symbol"]) == ["GOOG", "GOOGL"]
+    assert list(ev["event"]) == ["8k_101", "8k_101"]
+
+
+def test_form4_after_horizon_stored_only_when_quarter_published(env):
+    c = fake()
+    collect_events_us(c, ["AAPL"], today=TODAY)
+    ids = set(load_filings("us")["filing_id"])
+    assert "A-late" in ids and "A-4late" not in ids        # 8-K stored now, Form 4 later
+    c3 = fake()
+    c3.avail.add((2024, 3))
+    orig = c3.insider_quarter
+
+    def iq(y, q):
+        orig(y, q)                      # raises NotFound for unpublished quarters
+        return pd.DataFrame({"accession": ["A-4late"], "code": ["P"], "shares": [10.0],
+                             "price": [3.0]})
+    c3.insider_quarter = iq
+    collect_events_us(c3, ["AAPL"], today=date(2024, 10, 20))
+    df = load_filings("us").set_index("filing_id")
+    assert df.loc["A-4late", "insider_usd"] == 30.0
+    assert read_json(state_path("us"), {})["AAPL"]["insider_through"] == "2024-09-30"
+
+
+def test_insider_403_not_complete_and_no_nan_row(env):
+    class Forbidden(FakeEdgar):
+        def insider_quarter(self, y, q):
+            if (y, q) == (2024, 1):
+                raise EdgarError("http", "HTTP 403")
+            return super().insider_quarter(y, q)
+
+    c = Forbidden({"0000000001": [
+        sub("A-4", "2024-03-04", "2024-03-04T18:00:00.000Z", "4"),
+        sub("A-8k", "2024-02-01", "2024-02-01T08:30:00.000Z", "8-K", "1.01")]})
+    with pytest.raises(EdgarError, match="403"):
+        collect_events_us(c, ["AAPL"], today=TODAY)
+    assert "AAPL" not in read_json(state_path("us"), {})
+    assert incomplete_targets("us") == ["AAPL"]
+    df = load_filings("us")
+    assert df.empty or "A-4" not in set(df["filing_id"])
+
+
+def test_unpublished_newest_quarter_backs_off_and_403_is_not_not_found():
+    c = client(lambda r: httpx.Response(403))
+    with pytest.raises(EdgarError) as ei:
+        c.insider_quarter(2024, 1)
+    assert not isinstance(ei.value, EdgarNotFound)
+    out = FakeEdgar(avail=((2024, 1),))
+    assert collect_us._Insider(out).horizon(date(2024, 8, 1)) == date(2024, 3, 31)
+    assert out.insider_calls == [(2024, 3), (2024, 2), (2024, 1)]
+    ins = collect_us._Insider(out)
+    ins.get(2024, 3); ins.get(2024, 3)
+    assert out.insider_calls.count((2024, 3)) == 2         # once per _Insider (per run)

@@ -18,7 +18,9 @@ ASSUMPTIONS (not verifiable offline; the controller checks them against real dat
    TRANS_SHARES, TRANS_PRICEPERSHARE; a missing column raises EdgarError("insider layout").
    The Form 4 XML fallback (primaryDocument per filing) is NOT implemented: follow-up if A2
    fails at runtime.
- - A3 An insider data set not yet published answers 404 (or 403 from S3): `EdgarNotFound`.
+ - A3 An insider data set not yet published answers 404: `EdgarNotFound` (ruling R14: 403 and
+   every other failure is a plain EdgarError, never "not published", since SEC also answers
+   rate excess with 403).
 
 Errors never carry a URL or the User-Agent: only class names and status codes.
 """
@@ -107,8 +109,8 @@ class EdgarClient:
         code = resp.status_code
         if code == 429:
             raise EdgarRateLimited("429", "rate limited")
-        if missing_ok and code in (403, 404):
-            raise EdgarNotFound(str(code), "not available")
+        if missing_ok and code == 404:
+            raise EdgarNotFound("404", "not available")
         if code != 200:
             raise EdgarError("http", f"HTTP {code}")
         return resp

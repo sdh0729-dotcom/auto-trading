@@ -176,3 +176,13 @@ def test_limit_fetches_subset_but_targets_describe_all(env):
     assert incomplete_targets("kr") == ["000002"]
     collect_events_kr(FakeClient(), ["000001", "000002", "999999"], today=TODAY)
     assert incomplete_targets("kr") == []
+
+
+def test_append_dedupes_on_filing_id_and_symbol(env):
+    from autotrade.disclosure.store import FILING_COLUMNS, append_filings
+    row = {"filing_id": "R1", "symbol": "A", "corp_code": "C", "filed_date": date(2024, 1, 2),
+           "title": "t", "kind": "B", "filer": "f", "remark": ""}
+    df = pd.DataFrame([row, {**row, "symbol": "B"}], columns=FILING_COLUMNS)
+    append_filings("kr", df)
+    append_filings("kr", df)
+    assert sorted(load_filings("kr")["symbol"]) == ["A", "B"]

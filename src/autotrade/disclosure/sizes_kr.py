@@ -32,30 +32,22 @@ from __future__ import annotations
 import io
 import re
 import zipfile
-from pathlib import Path
-
 import pandas as pd
-import yaml
 
-from autotrade.config import _config_root
 from autotrade.disclosure.dart import DartError, DartRateLimited
+from autotrade.disclosure.events import read_table, strip_corrections  # noqa: F401 (re-export)
 from autotrade.disclosure.store import append_sizes, load_filings, load_sizes
 
 ORDER = ("buyback_krw", "supply_revenue_ratio", "rights_dilution")
 DETAIL = {"buyback_krw": ("tsstkAqDecsn.json", ("aqpln_prc_ostk", "aqpln_prc_estk")),
           "rights_dilution": ("piicDecsn.json", None)}
-_TAGS = re.compile(r"^\s*(\[[^\]]*\]\s*)+")
 BATCH = 25
 
 
-def strip_corrections(title: str) -> str:
-    return _TAGS.sub("", str(title)).strip()
-
-
 def size_patterns(market: str) -> dict[str, str]:
-    """measure -> title regex, read from the `size` entries of config/events/<market>.yaml."""
-    cfg = yaml.safe_load((Path(_config_root()) / "events" / f"{market}.yaml").read_text("utf-8"))
-    return {e["size"]: e["match"] for e in cfg["events"] if e.get("size")}
+    """measure -> title regex, from the `size` entries of config/events/<market>.yaml (read
+    by events.read_table, the one reader of that file)."""
+    return {e["size"]: e["match"] for e in read_table(market)["events"] if e.get("size")}
 
 
 def size_targets(filings: pd.DataFrame, market: str = "kr") -> pd.DataFrame:

@@ -23,6 +23,7 @@ import pandas as pd
 
 from autotrade import pipeline as P
 from autotrade.data.store import load_bars, load_panel
+from autotrade.disclosure.events import attach_events
 from autotrade.screen.simulate import simulate
 from autotrade.sizing import run_portfolio
 from autotrade.validate.criteria import period_equity
@@ -113,6 +114,7 @@ def run(pocket: str, market: str) -> ForwardResult:
     s = P._setup(pocket, market)
     start = pd.Timestamp(rec["start"])
     panel = load_panel(market, None, s.lab.history_start, LOAD_UNTIL)   # every stored day
+    panel = attach_events(panel, market, LOAD_UNTIL)     # ETFs file nothing: KR ETF unchanged
     cal = panel.close.index
     days = cal[cal >= start]
     if len(days) == 0:

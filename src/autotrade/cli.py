@@ -96,6 +96,31 @@ def collect_events(market: str = typer.Option(..., help="kr | us"),
 
 @app.command()
 @_expected_errors
+def events(market: str = typer.Option(..., help="kr | us"),
+           unmatched: int = typer.Option(20, help="show the N most frequent unmatched titles")):
+    """Classified filings: events by year, target coverage, frequent unmatched titles."""
+    r = pipeline.events_report(market, unmatched)
+    typer.echo(f"filings {r['filings']}, events {r['events']} (repeats dropped), corrections "
+               f"{r['corrections']}, unmatched {r['unmatched_total']}")
+    if len(r["counts"]):
+        _show(r["counts"].rename_axis(columns=None).reset_index())
+    t = r["targets"]
+    if t:
+        dt = t.get("delisted_targets", 0)
+        cov = f"{t.get('delisted_mapped', 0) / dt:.2f}" if dt else "n/a"
+        typer.echo(f"targets {t.get('targets', 0)}, mapped {t.get('mapped', 0)}, incomplete "
+                   f"{r['incomplete']} | delisted {dt}, mapped {t.get('delisted_mapped', 0)} "
+                   f"(coverage {cov})")
+    else:
+        typer.echo("targets: none recorded (run `lab collect-events`)")
+    if r["unmatched"]:
+        typer.echo(f"top {len(r['unmatched'])} unmatched:")
+        for title, n in r["unmatched"]:
+            typer.echo(f"  {n:6d}  {title}")
+
+
+@app.command()
+@_expected_errors
 def collect(market: str = typer.Option(..., help="kr | us"),
             since: Optional[str] = typer.Option(None, help="YYYY-MM-DD (default swing_start - warmup_days)"),
             limit: Optional[int] = typer.Option(None, help="first N symbols only")):

@@ -48,6 +48,9 @@ from autotrade.data.store import (calendar, data_root, load_meta, load_bars, loa
 from autotrade.disclosure.collect_kr import collect_events_kr, event_targets
 from autotrade.disclosure.sizes_kr import collect_sizes_kr
 from autotrade.disclosure.dart import make_dart_client_from_env
+from autotrade.disclosure.events import attach_events
+from autotrade.disclosure.events import report as events_report_of
+from autotrade.disclosure.store import incomplete_targets, load_filings
 from autotrade.disclosure.store import lock_path as events_lock_path
 from autotrade.report import (CONFIDENCE_FORMULAS, RuleCard, limitations, write_leaderboard,
                               write_rule_card)
@@ -396,7 +399,9 @@ def _panel(s: Setup, end: date) -> Panel:
         raise LabError("stored data changed while running; re-run the command")
     if p.calendar is not None:
         p = replace(p, calendar=p.calendar[p.calendar <= pd.Timestamp(s.record.data_cutoff)])
-    return p
+    # events with signal_date <= end only (the sealed period's events stay out of screen /
+    # validate exactly like its prices)
+    return attach_events(p, s.market.market, end)
 
 
 def _eligible(s: Setup, panel: Panel, scenario: str) -> pd.DataFrame:
@@ -553,6 +558,17 @@ def _wait_for_daily_job() -> None:
     """The daily job holds data/logs/.lock while it runs: stay off the API until it is done."""
     while _daily_job_lock().exists():
         time.sleep(30)
+
+
+def events_report(market: str, unmatched: int = 20) -> dict:
+    """`lab events`: counts by event x year, target coverage, frequent unmatched titles."""
+    _check_market(market)
+    if load_filings(market).empty:
+        raise LabError(f"no filings stored for {market}: run `lab collect-events --market "
+                       f"{market}` first")
+    out = events_report_of(market, calendar(market)[0], unmatched)
+    out["incomplete"] = len(incomplete_targets(market))
+    return out
 
 
 def collect_events(market: str, limit: int | None = None) -> dict:

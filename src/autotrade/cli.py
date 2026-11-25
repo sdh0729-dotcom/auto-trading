@@ -10,12 +10,13 @@ import typer
 
 from autotrade import pipeline
 from autotrade.config import ConfigError, load_env
+from autotrade.disclosure.dart import DartError
 from autotrade.validate.seal import SealViolation
 
 app = typer.Typer(no_args_is_help=True, add_completion=False,
                   help="Auto-trading research lab (read-only market data, no orders).")
 
-EXPECTED_ERRORS = (pipeline.LabError, ConfigError, SealViolation)
+EXPECTED_ERRORS = (pipeline.LabError, ConfigError, SealViolation, DartError)
 
 
 @app.callback()
@@ -80,6 +81,17 @@ def collect_minute(market: str = typer.Option(..., help="kr | us"),
     s = pipeline.collect_minute(market, limit)
     typer.echo(f"symbols {s['symbols']}, added {s['added']} | complete {s['complete']}, "
                f"not found {s['not_found']}, failed {s['failed']}")
+
+
+@app.command("collect-events")
+@_expected_errors
+def collect_events(market: str = typer.Option(..., help="kr | us"),
+                   limit: Optional[int] = typer.Option(None, help="first N symbols only")):
+    """Company filings (DART) for the swing universe stocks (resumable per symbol)."""
+    s = pipeline.collect_events(market, limit)
+    typer.echo(f"symbols {s['symbols']}, filings {s['filings']} | complete {s['complete']}, "
+               f"unmapped {s['unmapped']}" + (" | DART rate limit hit: rerun later"
+                                              if s["rate_limited"] else ""))
 
 
 @app.command()

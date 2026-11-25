@@ -43,8 +43,11 @@ from autotrade.data.minute_store import minute_bounds, minute_calendar, minute_d
 from autotrade.data.krx_overlay import refresh_overlays, save_overlay_record
 from autotrade.data.quality import check_daily, hard_issues
 from autotrade.data.sessions import auction_lead_minutes
-from autotrade.data.store import (calendar, data_root, load_bars, load_daily, load_panel,
+from autotrade.data.store import (calendar, data_root, load_meta, load_bars, load_daily, load_panel,
                                   save_meta, stored_symbols, trading_dates)
+from autotrade.disclosure.collect_kr import collect_events_kr, event_targets
+from autotrade.disclosure.dart import make_dart_client_from_env
+from autotrade.disclosure.store import lock_path as events_lock_path
 from autotrade.report import (CONFIDENCE_FORMULAS, RuleCard, limitations, write_leaderboard,
                               write_rule_card)
 from autotrade.rules.registry import DAYTRADE_FAMILIES, SWING_FAMILIES
@@ -135,18 +138,16 @@ def collect_lock_path(market: str) -> Path:
 
 
 @contextmanager
-def _collect_lock(market: str):
-    """Hold the market's collector lock (non-blocking): LabError if another run holds it.
+def _exclusive_lock(path: Path, message: str):
+    """Hold an flock on `path` (non-blocking): LabError(message) if another process holds it.
     The lock dies with its process, so a killed run never leaves a stale lock behind."""
-    path = collect_lock_path(market)
     path.parent.mkdir(parents=True, exist_ok=True)
     f = open(path, "a")
     try:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise LabError(f"`lab collect-minute --market {market}` is already running "
-                           f"(lock {path}): wait for it to finish") from None
+            raise LabError(message) from None
         try:
             yield
         finally:
@@ -155,9 +156,14 @@ def _collect_lock(market: str):
         f.close()
 
 
-def collect_running(market: str) -> bool:
-    """True while some process holds the market's collector lock."""
+def _collect_lock(market: str):
+    """The market's minute-collector lock: LabError if another run holds it."""
     path = collect_lock_path(market)
+    return _exclusive_lock(path, f"`lab collect-minute --market {market}` is already running "
+                                 f"(lock {path}): wait for it to finish")
+
+
+def _lock_held(path: Path) -> bool:
     if not path.exists():
         return False
     with open(path, "a") as f:
@@ -167,6 +173,16 @@ def collect_running(market: str) -> bool:
             return True
         fcntl.flock(f, fcntl.LOCK_UN)
         return False
+
+
+def collect_running(market: str) -> bool:
+    """True while some process holds the market's collector lock."""
+    return _lock_held(collect_lock_path(market))
+
+
+def events_running(market: str) -> bool:
+    """True while some process holds the market's `lab collect-events` lock."""
+    return _lock_held(events_lock_path(market))
 
 
 def _refuse_incomplete_minutes(market: str) -> None:
@@ -536,6 +552,29 @@ def _wait_for_daily_job() -> None:
     """The daily job holds data/logs/.lock while it runs: stay off the API until it is done."""
     while _daily_job_lock().exists():
         time.sleep(30)
+
+
+def collect_events(market: str, limit: int | None = None) -> dict:
+    """Company filings (DART, KR) of the swing paper-universe stocks into the event store.
+    Resumable per symbol; `limit` keeps the first N targets. One run per market at a time
+    (flock on events_root/.collect.lock). A DART rate limit stops the run cleanly."""
+    _check_market(market)
+    if market == "us":
+        raise LabError("US filings collector arrives with the EDGAR task")
+    path = events_lock_path(market)
+    with _exclusive_lock(path, f"`lab collect-events --market {market}` is already running "
+                               f"(lock {path}): wait for it to finish"):
+        syms = event_targets(market)
+        if limit is not None:
+            syms = syms[:limit]
+        meta = load_meta(market)
+        delisted = {str(s) for s in meta.index[meta["delisted"].astype(bool)]}
+        client = make_dart_client_from_env()
+        try:
+            return collect_events_kr(client, syms, today=market_today(market).date(),
+                                     delisted=delisted)
+        except httpx.HTTPError as e:
+            raise LabError(f"collect-events failed: network error ({type(e).__name__})") from e
 
 
 def collect_minute(market: str, limit: int | None = None) -> dict:

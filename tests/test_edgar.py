@@ -358,3 +358,19 @@ def test_unpublished_newest_quarter_backs_off_and_403_is_not_not_found():
     ins = collect_us._Insider(out)
     ins.get(2024, 3); ins.get(2024, 3)
     assert out.insider_calls.count((2024, 3)) == 2         # once per _Insider (per run)
+
+
+def test_shared_cik_sibling_with_earlier_start_gets_old_filings(env):
+    class Since(FakeEdgar):
+        def submissions(self, cik, since=None):
+            rows = super().submissions(cik, since)
+            return [r for r in rows if since is None or r["filingDate"] >= since.isoformat()]
+
+    data = {"0000000003": [
+        sub("G-old", "2016-02-01", "2016-02-01T08:30:00.000Z", "8-K", "1.01"),
+        sub("G-new", "2024-06-10", "2024-06-10T08:30:00.000Z", "8-K", "1.01")]}
+    collect_events_us(Since(data), ["GOOG", "GOOGL"], today=date(2024, 6, 1), limit=1)
+    collect_events_us(Since(data), ["GOOG", "GOOGL"], today=date(2024, 6, 20))
+    df = load_filings("us")
+    got = {(r.symbol, r.filing_id) for r in df.itertuples()}
+    assert ("GOOGL", "G-old") in got and ("GOOGL", "G-new") in got and ("GOOG", "G-old") in got

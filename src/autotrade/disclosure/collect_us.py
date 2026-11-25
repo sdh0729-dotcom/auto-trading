@@ -24,7 +24,7 @@ A Form 4 whose quarter data cannot be read (any error but 404, or an unpublished
 before the horizon) raises EdgarError: that symbol is not marked complete and no NaN row is
 stored (ruling R14). Per-quarter aggregates (accession -> insider_usd) are cached under
 events_root("us")/insider/. Tickers sharing a CIK (share classes) each get their own rows
-(store dedupe is (filing_id, symbol); one submissions fetch per CIK per run). Ticker matching
+(store dedupe is (filing_id, symbol); one submissions fetch per (CIK, since) per run, so a sibling with an earlier start is never served a later-starting page set). Ticker matching
 upper-cases and treats "." as "-" ("BRK.B" = "BRK-B").
 """
 from __future__ import annotations
@@ -158,7 +158,7 @@ def collect_events_us(client, symbols: list[str], start: date = DEFAULT_START,
         if horizon is None:
             raise EdgarError("insider", "no insider data set available")
         out["horizon"] = horizon.isoformat()
-        subs: dict[str, list[dict]] = {}        # one submissions fetch per CIK per run
+        subs: dict[tuple, list[dict]] = {}      # one fetch per (CIK, since) per run
         for sym in (mapped if limit is None else mapped[:limit]):
             cik = cik_of[_norm(sym)]
             st = state.get(sym, {})
@@ -169,9 +169,10 @@ def collect_events_us(client, symbols: list[str], start: date = DEFAULT_START,
                 out["complete"] += 1
                 continue
             begin, begin_ins = done or start, ins or start
-            if cik not in subs:
-                subs[cik] = client.submissions(cik, since=min(begin, begin_ins))
-            rows = _rows(subs[cik], sym, cik, begin, begin_ins, today, horizon, insider)
+            key = (cik, min(begin, begin_ins))
+            if key not in subs:
+                subs[key] = client.submissions(cik, since=key[1])
+            rows = _rows(subs[key], sym, cik, begin, begin_ins, today, horizon, insider)
             append_filings("us", rows)
             out["filings"] += len(rows)
             state[sym] = {"done_through": today.isoformat(),

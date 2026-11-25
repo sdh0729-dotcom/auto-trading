@@ -14,6 +14,14 @@ FILING_COLUMNS = ["filing_id", "symbol", "corp_code", "filed_date", "title", "ki
                   "remark"]
 
 
+FILING_COLUMNS_US = ["filing_id", "symbol", "cik", "filed_date", "accepted_at", "form", "items",
+                     "insider_usd"]
+
+
+def filing_columns(market: str) -> list[str]:
+    return FILING_COLUMNS_US if market == "us" else FILING_COLUMNS
+
+
 def events_root(market: str) -> Path:
     return data_root() / market / "events"
 
@@ -37,7 +45,7 @@ def lock_path(market: str) -> Path:
 def load_filings(market: str) -> pd.DataFrame:
     p = filings_path(market)
     if not p.exists():
-        return pd.DataFrame(columns=FILING_COLUMNS)
+        return pd.DataFrame(columns=filing_columns(market))
     return pd.read_parquet(p)
 
 
@@ -45,7 +53,7 @@ def append_filings(market: str, df: pd.DataFrame) -> None:
     """Add rows (dedupe on filing_id, stored row wins); atomic temp + rename."""
     if df.empty:
         return
-    merged = pd.concat([load_filings(market), df[FILING_COLUMNS]], ignore_index=True)
+    merged = pd.concat([load_filings(market), df[filing_columns(market)]], ignore_index=True)
     merged = merged.drop_duplicates("filing_id", keep="first").reset_index(drop=True)
     write_parquet_atomic(merged, filings_path(market))
 

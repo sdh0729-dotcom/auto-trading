@@ -11,12 +11,13 @@ import typer
 from autotrade import pipeline
 from autotrade.config import ConfigError, load_env
 from autotrade.disclosure.dart import DartError
+from autotrade.disclosure.edgar import EdgarError
 from autotrade.validate.seal import SealViolation
 
 app = typer.Typer(no_args_is_help=True, add_completion=False,
                   help="Auto-trading research lab (read-only market data, no orders).")
 
-EXPECTED_ERRORS = (pipeline.LabError, ConfigError, SealViolation, DartError)
+EXPECTED_ERRORS = (pipeline.LabError, ConfigError, SealViolation, DartError, EdgarError)
 
 
 @app.callback()

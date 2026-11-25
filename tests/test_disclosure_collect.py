@@ -141,8 +141,11 @@ def test_second_collector_refused(env):
     assert pipeline.events_running("kr") is False
 
 
-def test_us_not_yet_available(env):
-    with pytest.raises(pipeline.LabError, match="EDGAR"):
+def test_us_without_sec_user_agent_refuses(env, monkeypatch):
+    monkeypatch.delenv("SEC_USER_AGENT", raising=False)
+    monkeypatch.setenv("AUTOTRADE_DOTENV", str(env / "none.env"))
+    monkeypatch.setattr(pipeline, "event_targets", lambda m: ["AAPL"])
+    with pytest.raises(pipeline.LabError, match="SEC_USER_AGENT missing"):
         pipeline.collect_events("us")
 
 

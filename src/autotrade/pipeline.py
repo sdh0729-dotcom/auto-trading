@@ -46,6 +46,8 @@ from autotrade.data.sessions import auction_lead_minutes
 from autotrade.data.store import (calendar, data_root, load_meta, load_bars, load_daily, load_panel,
                                   save_meta, stored_symbols, trading_dates)
 from autotrade.disclosure.collect_kr import collect_events_kr, event_targets
+from autotrade.disclosure.collect_us import collect_events_us
+from autotrade.disclosure.edgar import make_edgar_client_from_env
 from autotrade.disclosure.sizes_kr import collect_sizes_kr
 from autotrade.disclosure.dart import make_dart_client_from_env
 from autotrade.disclosure.events import attach_events, events_table_hash
@@ -630,16 +632,21 @@ def events_report(market: str, unmatched: int = 20) -> dict:
 
 
 def collect_events(market: str, limit: int | None = None) -> dict:
-    """Company filings (DART, KR) of the swing paper-universe stocks into the event store.
+    """Company filings (DART for KR, SEC EDGAR for US) of the swing paper-universe stocks into the event store.
     Resumable per symbol; `limit` keeps the first N targets. One run per market at a time
     (flock on events_root/.collect.lock). A DART rate limit stops the run cleanly."""
     _check_market(market)
-    if market == "us":
-        raise LabError("US filings collector arrives with the EDGAR task")
     path = events_lock_path(market)
     with _exclusive_lock(path, f"`lab collect-events --market {market}` is already running "
                                f"(lock {path}): wait for it to finish"):
         syms = event_targets(market)
+        if market == "us":
+            try:
+                return collect_events_us(make_edgar_client_from_env(), syms,
+                                         today=market_today(market).date(), limit=limit)
+            except httpx.HTTPError as e:
+                raise LabError(f"collect-events failed: network error ({type(e).__name__})"
+                               ) from e
         meta = load_meta(market)
         delisted = {str(s) for s in meta.index[meta["delisted"].astype(bool)]}
         client = make_dart_client_from_env()

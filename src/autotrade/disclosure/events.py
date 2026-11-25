@@ -22,11 +22,14 @@ forms ending in "/A". DART's `remark` column is NOT used: its 정/철 flags desc
 corrections / withdrawals (look-ahead). Withdrawals (KR titles containing 철회) are events
 with direction 0 and never remove the original event.
 
-Repeats: rows are ordered by (symbol, event, signal_date, filing_id); the first is kept, and a
-later row of the same symbol + event is dropped when its signal date lies fewer than
+Repeats (spec §6.1 "첫 건만 진입 신호로", ruling R10) apply to direction +1 events ONLY:
+rows are ordered by (symbol, event, signal_date, filing_id); the first is kept, and a later
++1 row of the same symbol + event is dropped when its signal date lies fewer than
 `repeat_days` calendar rows after the signal date of the last KEPT row (distance counted in
 rows of the trading calendar; distance 0 = same day). Dropped rows never restart the window:
-with repeat_days 20, rows 10 / 15 / 29 / 30 keep 10 and 30.
+with repeat_days 20, rows 10 / 15 / 29 / 30 keep 10 and 30. Direction -1 events are all kept
+(each one extends the no-entry block of `recent_negative`); direction 0 rows (withdrawals,
+record-only events) are all kept as recorded.
 
 Sizes: `size_ok` = size >= size_min; False when the size is NaN; True when the event has no
 size criterion (its size is NaN). KR buyback size = buyback_krw / adv at (signal date,
@@ -228,13 +231,17 @@ def _empty() -> pd.DataFrame:
                          "filing_id": pd.Series(dtype=object)})
 
 
-def _drop_repeats(df: pd.DataFrame, repeat_days: int) -> pd.DataFrame:
-    """See the module docstring: distance in calendar rows to the last KEPT row."""
+def _drop_repeats(df: pd.DataFrame, repeat_days: int, direction: pd.Series) -> pd.DataFrame:
+    """See the module docstring: +1 rows only, distance in calendar rows to the last KEPT
+    row of the same symbol + event; -1 and 0 rows are always kept."""
     df = df.sort_values(["symbol", "event", "signal_date", "filing_id"], kind="mergesort")
     keep = np.zeros(len(df), dtype=bool)
     last_key, last_row = None, 0
-    for i, (key, row) in enumerate(zip(zip(df["symbol"], df["event"]), df["_row"])):
-        if key != last_key or row - last_row >= repeat_days:
+    for i, (key, row, d) in enumerate(zip(zip(df["symbol"], df["event"]), df["_row"],
+                                          direction.reindex(df.index))):
+        if d != 1:
+            keep[i] = True
+        elif key != last_key or row - last_row >= repeat_days:
             keep[i] = True
             last_key, last_row = key, row
     return df[keep]
@@ -272,9 +279,8 @@ def load_events(market: str, calendar: pd.DatetimeIndex, adv: pd.DataFrame | Non
     if df.empty:
         return _empty()
     df["signal_date"] = cal[df["_row"].to_numpy()]
-    df = _drop_repeats(df, table.repeat_days)
-
     defs = table.by_name()
+    df = _drop_repeats(df, table.repeat_days, df["event"].map(lambda n: defs[n].direction))
     sizes = load_sizes(market)
     stored = {(f, m): v for f, m, v in zip(sizes["filing_id"].astype(str), sizes["measure"],
                                            sizes["value"])}

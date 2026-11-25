@@ -187,6 +187,27 @@ def test_repeat_within_20_days_dropped():
     assert sorted(ev["filing_id"]) == ["f10", "f30", "g15", "h15"]
 
 
+def test_negative_repeats_are_all_kept_and_extend_the_block():
+    """R10: the repeat drop applies to direction +1 only; every -1 event is kept, so the
+    negative block runs 20 rows from the LAST negative (rows 0 and 15 -> True through 34)."""
+    p = make_panel(60, ["A"], seed=1, start="2024-01-02")
+    p = replace(p, calendar=p.close.index)
+    idx = p.close.index
+    kr_filings(("n0", "A", nth(idx, 0), "감자결정"), ("n15", "A", nth(idx, 15), "감자결정"),
+               ("n15b", "A", nth(idx, 15), "감자결정"))
+    a = E.attach_events(p, "kr", idx[-1].date())
+    assert list(a.events["filing_id"]) == ["n0", "n15", "n15b"]
+    neg = E.recent_negative(a, 20)["A"]
+    assert neg.iloc[:35].all() and not neg.iloc[35:].any()
+
+
+def test_withdrawal_repeats_are_kept_as_recorded():
+    kr_filings(("w0", "A", nth(KR_CAL, 10), "유상증자결정(철회)"),
+               ("w5", "A", nth(KR_CAL, 15), "유상증자결정(철회)"))
+    ev = E.load_events("kr", KR_CAL)
+    assert list(ev["filing_id"]) == ["w0", "w5"] and (ev["direction"] == 0).all()
+
+
 def test_same_day_duplicates_keep_the_first_filing_id():
     kr_filings(("f2", "A", "2024-03-12", BUYBACK), ("f1", "A", "2024-03-12", BUYBACK))
     assert list(E.load_events("kr", KR_CAL)["filing_id"]) == ["f1"]
@@ -328,6 +349,22 @@ def test_panel_attaches_only_events_up_to_end(cli_env):
     assert list(screen_panel.events["filing_id"]) == ["in"]
     valid_panel = pipeline._panel(s, s.periods.valid[1])
     assert list(valid_panel.events["filing_id"]) == ["in", "out"]
+
+
+def test_validate_panel_has_no_sealed_period_event(cli_env):
+    """valid -> sealed boundary: the validate panel (prices through v1) carries no event with
+    a signal date in the sealed period (one dated v1 itself is kept: entry would be the
+    sealed period's first open, which simulate never fills inside validate)."""
+    s = pipeline._setup("swing", "kr", create=True)
+    v1, s0 = s.periods.valid[1], s.periods.sealed[0]
+    cal = s.calendar
+    j = cal.get_loc(pd.Timestamp(v1))
+    assert cal[j + 1] == pd.Timestamp(s0)
+    kr_filings(("at_v1", "A01", nth(cal, j), BUYBACK), ("sealed0", "A02", nth(cal, j + 1), BUYBACK),
+               ("sealed5", "A03", nth(cal, j + 5), "감자결정"))
+    ev = pipeline._panel(s, v1).events
+    assert list(ev["filing_id"]) == ["at_v1"]
+    assert (ev["signal_date"] < pd.Timestamp(s0)).all()
 
 
 def test_forward_panel_carries_events(cli_env, monkeypatch):

@@ -399,8 +399,10 @@ def _panel(s: Setup, end: date) -> Panel:
         raise LabError("stored data changed while running; re-run the command")
     if p.calendar is not None:
         p = replace(p, calendar=p.calendar[p.calendar <= pd.Timestamp(s.record.data_cutoff)])
-    # events with signal_date <= end only (the sealed period's events stay out of screen /
-    # validate exactly like its prices)
+    # events with signal_date <= end only: no event dated after `end` (e.g. in the sealed
+    # period) reaches screen / validate. An event dated `end` itself is kept although it is
+    # tradable only at the next period's first open; harmless, simulate never fills an entry
+    # signalled on the panel's last row (e >= n)
     return attach_events(p, s.market.market, end)
 
 

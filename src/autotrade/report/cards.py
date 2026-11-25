@@ -17,6 +17,7 @@ CONFIDENCE_FORMULAS = {
     "reversal": "(top_k − 하락률 순위 + 1) ÷ top_k",
     "overnight": "0.5 고정",
     "tom": "0.5 고정",
+    "disclosure": "그날 묶음 사건이 크기 하한 통과(sized=True면 항상) → 1.0, 아니면 0.5",
 }
 
 

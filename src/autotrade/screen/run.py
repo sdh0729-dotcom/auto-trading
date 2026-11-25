@@ -46,9 +46,10 @@ def trade_metrics(net: pd.DataFrame) -> dict:
 
 def screen_family(family: str, panel: Panel, eligible: pd.DataFrame, start: date, end: date,
                   cost_model: CostModel, log: ExperimentLog, pocket: str, market: str,
-                  sealed_start: date) -> pd.DataFrame:
+                  sealed_start: date, extra_metrics: dict | None = None) -> pd.DataFrame:
     """One row per grid params. Refuses any period reaching the seal; bars after `end` are
-    dropped before signals are computed, so sealed data cannot leak in."""
+    dropped before signals are computed, so sealed data cannot leak in. `extra_metrics`
+    (e.g. the event-table hash of event families) is added to every logged row."""
     if pd.Timestamp(end) >= pd.Timestamp(sealed_start):
         raise SealViolation(f"screen end {end} reaches sealed period starting {sealed_start}")
     if pd.Timestamp(start) > pd.Timestamp(end):
@@ -63,7 +64,8 @@ def screen_family(family: str, panel: Panel, eligible: pd.DataFrame, start: date
         rule = cls(params)
         trades = simulate(visible, rule.signals(visible, eligible=elig), elig, start, end)
         metrics = trade_metrics(cost_model.net_returns(trades))
-        log.record(pocket, market, family, rule.rule_id, params, "screen", period, metrics)
+        log.record(pocket, market, family, rule.rule_id, params, "screen", period,
+                   {**metrics, **(extra_metrics or {})})
         out.append({"rule_id": rule.rule_id, "params": params, **metrics})
     return pd.DataFrame(out, columns=SCREEN_COLUMNS)
 

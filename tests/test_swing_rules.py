@@ -2,13 +2,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from autotrade.rules.registry import SWING_FAMILIES
+from autotrade.rules.registry import EVENT_FAMILIES, SWING_FAMILIES
 from autotrade.rules.swing.breakout import Breakout
 from autotrade.types import EqualWeight
 from tests.fixtures import make_panel
 
+# price families (event families need Panel.events: tests/test_disclosure_rule.py)
+PRICE_FAMILIES = sorted(set(SWING_FAMILIES) - EVENT_FAMILIES)
 
-@pytest.mark.parametrize("family", SWING_FAMILIES)
+
+@pytest.mark.parametrize("family", PRICE_FAMILIES)
 def test_signals_shape_and_ranges(family):
     p = make_panel(400, ["A", "B", "C"], seed=3)
     for params in SWING_FAMILIES[family].grid()[:3]:
@@ -20,7 +23,7 @@ def test_signals_shape_and_ranges(family):
         assert 1 <= s.max_hold_days <= 20
 
 
-@pytest.mark.parametrize("family", SWING_FAMILIES)
+@pytest.mark.parametrize("family", PRICE_FAMILIES)
 def test_signal_at_t_ignores_future(family):
     p = make_panel(400, ["A", "B", "C"], seed=4)
     r = SWING_FAMILIES[family](SWING_FAMILIES[family].grid()[0])
@@ -32,7 +35,7 @@ def test_signal_at_t_ignores_future(family):
     pd.testing.assert_frame_equal(s1.exits.iloc[:300], s2.exits.iloc[:300])
 
 
-@pytest.mark.parametrize("family", SWING_FAMILIES)
+@pytest.mark.parametrize("family", PRICE_FAMILIES)
 def test_families_emit_some_entries(family):
     p = make_panel(600, ["A", "B", "C", "D"], seed=7, products={s: "etf" for s in "ABCD"})
     hits = [SWING_FAMILIES[family](g).signals(p).entries.any().any() for g in SWING_FAMILIES[family].grid()]
@@ -49,12 +52,15 @@ def test_overnight_only_etf():
 
 
 def test_grid_size_capped():
-    assert all(len(f.grid()) <= 50 for f in SWING_FAMILIES.values())
+    """Price families; `disclosure` has the fixed 108-point grid of spec §10-1 #2."""
+    assert all(len(SWING_FAMILIES[f].grid()) <= 50 for f in PRICE_FAMILIES)
 
 
 def test_registry_has_all_families():
     assert set(SWING_FAMILIES) == {"breakout", "ma_trend", "oversold", "momentum",
-                                   "reversal", "overnight", "tom", "etf_rotation"}
+                                   "reversal", "overnight", "tom", "etf_rotation",
+                                   "disclosure"}
+    assert EVENT_FAMILIES == {"disclosure"}
 
 
 def test_rule_id_stable():
@@ -163,7 +169,7 @@ def test_reversal_ranks_only_eligible_symbols():
         assert s.entries.iloc[60].sum() == 1 and s.entries.iloc[60][others.idxmax()]
 
 
-@pytest.mark.parametrize("family", sorted(set(SWING_FAMILIES) - {"momentum", "reversal", "etf_rotation"}))
+@pytest.mark.parametrize("family", sorted(set(PRICE_FAMILIES) - {"momentum", "reversal", "etf_rotation"}))
 def test_other_families_ignore_eligible(family):
     p = make_panel(300, ["A", "B", "C"], seed=5, products={s: "etf" for s in "ABC"})
     rule = SWING_FAMILIES[family](SWING_FAMILIES[family].grid()[0])

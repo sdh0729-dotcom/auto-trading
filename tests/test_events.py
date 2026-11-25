@@ -15,7 +15,7 @@ from autotrade.data.store import write_parquet_atomic
 from autotrade.disclosure import events as E
 from autotrade.disclosure.store import (FILING_COLUMNS, append_filings, append_sizes,
                                         filings_path, targets_path, write_json)
-from autotrade.rules.registry import SWING_FAMILIES
+from autotrade.rules.registry import EVENT_FAMILIES, SWING_FAMILIES
 from tests.fixtures import make_panel
 from tests.test_cli import cli_env, extend_store, periods_of, run  # noqa: F401 (fixture)
 
@@ -385,7 +385,7 @@ def test_forward_panel_carries_events(cli_env, monkeypatch):
     assert len(seen) == 1 and list(seen[0]["filing_id"]) == ["fw"]
 
 
-@pytest.mark.parametrize("family", SWING_FAMILIES)
+@pytest.mark.parametrize("family", sorted(set(SWING_FAMILIES) - EVENT_FAMILIES))
 def test_existing_families_unchanged_with_events(family):
     p = make_panel(400, ["A", "B", "C", "E1"], seed=7, products={"E1": "etf"})
     rng = np.random.default_rng(0)

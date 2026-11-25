@@ -4,6 +4,8 @@ from __future__ import annotations
 from autotrade.config import MarketConfig
 from autotrade.data.delisted_kr import load_supplement_record
 from autotrade.data.krx_overlay import load_overlay_record
+from autotrade.disclosure.store import read_json, targets_path
+from autotrade.rules.registry import EVENT_FAMILIES
 
 
 def _supplement_line(market: str) -> str:
@@ -33,6 +35,26 @@ def _overlay_line() -> str:
             "대체하지 못한 종목은 토스 KRX+NXT 통합 시세(NXT 시간대 체결 포함)로 남아 있다.")
 
 
+def _event_lines(market: str) -> list[str]:
+    """Event families: KR filings carry no time (entry at the open after the filing date),
+    classification by title / form (the rule table), and the delisted-target corp-code
+    mapping rate recorded in targets.json."""
+    out = []
+    if market == "kr":
+        out.append("국내 공시 시각 없음 → 공시일 다음 거래일 시가 가정")
+    out.append("공시 제목·양식 기반 분류(규칙 표)")
+    try:
+        t = read_json(targets_path(market), {})
+    except (OSError, ValueError):
+        t = {}
+    total = int(t.get("delisted_targets") or 0) if isinstance(t, dict) else 0
+    if total > 0:
+        out.append(f"상폐 종목 공시 매핑률 {int(t.get('delisted_mapped') or 0) / total:.0%}")
+    else:
+        out.append("상폐 종목 공시 매핑률 기록 없음(상폐 대상 0 또는 targets.json 없음)")
+    return out
+
+
 def _daytrade_lines(market: str) -> list[str]:
     out = ["상장폐지 종목: 토스 1분봉에 상장폐지 종목 데이터가 없다 — 단타 유니버스는 생존자만이다"
            "(생존 편향)."]
@@ -60,8 +82,9 @@ def limitations(market: MarketConfig, family: str | None = None,
                 pocket: str = "swing") -> list[str]:
     """Delisted-data coverage (per market: the recorded supplement results where the
     market supplements), not NBBO, no suspension/warning history, KR daily bars from NXT
-    start (the recorded KRX overlay coverage), US fractional-order limits not modelled, and
-    the overnight family's 1-night hold exception."""
+    start (the recorded KRX overlay coverage), US fractional-order limits not modelled, the
+    overnight family's 1-night hold exception, and for event families the filing lines
+    (`_event_lines`)."""
     out = []
     if pocket == "daytrade":
         return _daytrade_lines(market.market)
@@ -80,4 +103,6 @@ def limitations(market: MarketConfig, family: str | None = None,
                    "불가)을 아직 반영하지 않음 — 계획 2.")
     if family == "overnight":
         out.append("overnight 계열: 1박 보유 — 스윙 보유 2~20거래일 규칙의 예외.")
+    if family in EVENT_FAMILIES:
+        out += _event_lines(market.market)
     return out

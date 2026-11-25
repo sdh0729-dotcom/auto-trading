@@ -160,7 +160,8 @@ def universe(market: str = typer.Option(..., help="kr | us"),
 @app.command()
 @_expected_errors
 def screen(pocket: str = typer.Option("swing"), market: str = typer.Option(..., help="kr | us"),
-           family: str = typer.Option("all", help="family name or all")):
+           family: str = typer.Option(
+               "all", help="family name, all (price families) or events (filing families)")):
     """Screen rule families on the train period (fixed amount)."""
     df = pipeline.screen(pocket, market, family)
     _show(df[["rule_id", "n_trades", "mean_net_r", "t_stat", "profit_factor", "win_rate",

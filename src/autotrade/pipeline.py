@@ -48,11 +48,11 @@ from autotrade.data.store import (calendar, data_root, load_meta, load_bars, loa
 from autotrade.disclosure.collect_kr import collect_events_kr, event_targets
 from autotrade.disclosure.collect_us import collect_events_us
 from autotrade.disclosure.edgar import make_edgar_client_from_env
-from autotrade.disclosure.sizes_kr import collect_sizes_kr
+from autotrade.disclosure.sizes_kr import collect_sizes_kr, size_targets
 from autotrade.disclosure.dart import make_dart_client_from_env
 from autotrade.disclosure.events import attach_events, events_table_hash
 from autotrade.disclosure.events import report as events_report_of
-from autotrade.disclosure.store import incomplete_targets, load_filings, read_json, targets_path
+from autotrade.disclosure.store import incomplete_targets, load_filings, load_sizes, read_json, targets_path
 from autotrade.disclosure.store import lock_path as events_lock_path
 from autotrade.report import (CONFIDENCE_FORMULAS, RuleCard, limitations, write_leaderboard,
                               write_rule_card)
@@ -253,10 +253,21 @@ def _refuse_incomplete_events(market: str) -> None:
                        f"({', '.join(missing[:5])}{', ...' if len(missing) > 5 else ''}): "
                        f"{fix}")
     total, mapped = int(t.get("delisted_targets") or 0), int(t.get("delisted_mapped") or 0)
+    what = "delisted-target corp-code" if market == "kr" else "ticker->CIK mapping"
     if total > 0 and mapped / total < MIN_DELISTED_COVERAGE:
-        raise LabError(f"{market} delisted-target corp-code coverage {mapped / total:.0%} "
+        raise LabError(f"{market} {what} coverage {mapped / total:.0%} "
                        f"({mapped}/{total}) is below {MIN_DELISTED_COVERAGE:.0%}: report it "
                        "before screening event rules (spec §10-1 #5)")
+    if market == "kr":          # an unfinished size pass would change the event set later
+        try:
+            have = set(load_sizes("kr")["filing_id"])
+            n = int((~size_targets(load_filings("kr"))["filing_id"].isin(have)).sum())
+        except Exception as e:          # corrupt store / invalid event table
+            raise LabError(f"{market} filings / sizes / event table unreadable "
+                           f"({type(e).__name__}: {str(e)[:120]}): {fix}") from e
+        if n:
+            raise LabError(f"{n} {market} filings still need size details: run "
+                           f"`lab collect-events --market {market}`")
 
 
 def _events_hash(market: str) -> str:
@@ -445,10 +456,12 @@ def _refuse_opened_overlap(pocket: str, market: str, start: date, end: date,
                                 f"{s0}~{s1} already opened (rule {t.rule_id})")
 
 
-def _panel(s: Setup, end: date) -> Panel:
+def _panel(s: Setup, end: date, events: bool = False) -> Panel:
     """Prices from lab.history_start (signal warm-up before swing_start) through `end`; its
     `calendar` (trading dates only) is cut at the period record's data cutoff, so dates
-    collected later never change what a screen / validate / verify run computes."""
+    collected later never change what a screen / validate / verify run computes. Events are
+    attached only when `events` (an event family is involved): price-only runs must not
+    depend on the filings store or the event table."""
     p = load_panel(s.market.market, None, s.lab.history_start, end)
     idx = p.close.index
     # the daytrade calendar is the minute one: only the swing calendar mirrors the daily bars
@@ -461,7 +474,7 @@ def _panel(s: Setup, end: date) -> Panel:
     # period) reaches screen / validate. An event dated `end` itself is kept although it is
     # tradable only at the next period's first open; harmless, simulate never fills an entry
     # signalled on the panel's last row (e >= n)
-    return attach_events(p, s.market.market, end)
+    return attach_events(p, s.market.market, end) if events else p
 
 
 def _eligible(s: Setup, panel: Panel, scenario: str) -> pd.DataFrame:
@@ -861,7 +874,7 @@ def screen(pocket: str, market: str, family: str = "all") -> pd.DataFrame:
     s = _setup(pocket, market, create=True)
     t0, t1 = s.periods.train
     _refuse_opened_overlap(pocket, market, t0, t1, "screen")
-    panel = _panel(s, t1)
+    panel = _panel(s, t1, with_events)
     elig = _eligible(s, panel, "paper")
     cm = _cost_model(s.market, panel.meta)
     log = ExperimentLog(experiments_path())
@@ -998,7 +1011,7 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
 
     (t0, _), (v0, v1) = s.periods.train, s.periods.valid
     _refuse_opened_overlap(pocket, market, t0, v1, "validate")
-    panel = _panel(s, v1)
+    panel = _panel(s, v1, bool(with_events))
     daytrade = pocket == "daytrade"
     cal = s.calendar if daytrade else panel.close.index
     elig = _eligible(s, panel, "paper")
@@ -1264,7 +1277,7 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
                            data_cutoff=s.record.data_cutoff.isoformat(),
                            n_symbols=len(stored_symbols(market)), cycle=cycle,
                            allowed_rules=allowed)    # before any sealed price is read
-    panel = _panel(s, s.periods.sealed[1])
+    panel = _panel(s, s.periods.sealed[1], family in EVENT_FAMILIES)
     sealed = registry.load_sealed(panel, s.periods, ticket)  # validates the ticket
     if not sealed.close.index.equals(s.calendar[(s.calendar >= pd.Timestamp(
             s.periods.sealed[0]))]):

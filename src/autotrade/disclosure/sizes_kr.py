@@ -15,6 +15,10 @@ Endpoints / fields (DART OpenAPI), confirmed against real DART on 2026-11-25 by 
  - buyback   `tsstkAqDecsn.json` (자기주식 취득 결정): `aqpln_prc_ostk` (common) +
    `aqpln_prc_estk` (other) planned acquisition amount, KRW. Value = sum of the present ones.
    (Confirmed on a Samsung filing, 2024-11.)
+ - buyback, trust contract (title contains 신탁계약체결, e.g. 자기주식취득신탁계약체결결정):
+   `tsstkAqTrctrCnsDecsn.json`, `ctr_prc` (contract amount, KRW comma string). Same measure
+   `buyback_krw`. tsstkAqDecsn never carries these rcept_no (confirmed on KB금융,
+   rcept_no 20160204000279, "300,000,000,000").
  - rights    `piicDecsn.json` (유상증자 결정): new shares `nstk_ostk_cnt` + `nstk_estk_cnt`,
    shares before `bfic_tisstk_ostk` + `bfic_tisstk_estk` (comma strings, "-" when blank).
    dilution = new / existing, common and other summed on both sides (a missing side counts 0;
@@ -41,6 +45,7 @@ from autotrade.disclosure.store import append_sizes, load_filings, load_sizes
 ORDER = ("buyback_krw", "supply_revenue_ratio", "rights_dilution")
 DETAIL = {"buyback_krw": ("tsstkAqDecsn.json", ("aqpln_prc_ostk", "aqpln_prc_estk")),
           "rights_dilution": ("piicDecsn.json", None)}
+TRUST_ENDPOINT = "tsstkAqTrctrCnsDecsn.json"
 BATCH = 25
 
 
@@ -89,6 +94,11 @@ def buyback_value(row: dict) -> float:
     return float("nan") if v is None else v
 
 
+def trust_value(row: dict) -> float:
+    v = _num(row.get("ctr_prc"))
+    return float("nan") if v is None else v
+
+
 def dilution_value(row: dict) -> float:
     new = _sum(row, ("nstk_ostk_cnt", "nstk_estk_cnt"))
     old = _sum(row, ("bfic_tisstk_ostk", "bfic_tisstk_estk"))
@@ -133,6 +143,10 @@ def parse_supply_ratio(doc: bytes) -> float | None:
         return None
 
 
+def _is_trust(title) -> bool:
+    return "신탁계약체결" in re.sub(r"\s+", "", strip_corrections(str(title)))
+
+
 TRANSIENT = ("http", "800", "900")
 
 
@@ -174,8 +188,15 @@ def collect_sizes_kr(client, limit: int | None = None) -> dict:
                     if len(batch) >= BATCH:
                         flush()
                 continue
-            endpoint = DETAIL[measure][0]
-            for corp, g in part.groupby("corp_code", sort=True):
+            groups = [(DETAIL[measure][0], _VALUE[measure], c, g)
+                      for c, g in part.groupby("corp_code", sort=True)]
+            if measure == "buyback_krw":      # trust-contract filings: their own endpoint
+                trust = part["title"].map(_is_trust).astype(bool)
+                groups = [(DETAIL[measure][0], _VALUE[measure], c, g)
+                          for c, g in part[~trust].groupby("corp_code", sort=True)]
+                groups += [(TRUST_ENDPOINT, trust_value, c, g)
+                           for c, g in part[trust].groupby("corp_code", sort=True)]
+            for endpoint, value, corp, g in groups:
                 if limit is not None and calls >= limit:
                     return out
                 calls += 1
@@ -191,7 +212,7 @@ def collect_sizes_kr(client, limit: int | None = None) -> dict:
                 for rec in g.to_dict("records"):
                     r = by.get(rec["filing_id"])
                     batch.append({"filing_id": rec["filing_id"], "measure": measure,
-                                  "value": nan if r is None else _VALUE[measure](r)})
+                                  "value": nan if r is None else value(r)})
                 flush()
     except DartRateLimited:
         out["rate_limited"] = True

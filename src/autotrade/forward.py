@@ -131,7 +131,8 @@ def run(pocket: str, market: str) -> ForwardResult:
             P._refuse_changed_table(market, r["rule_id"], r)
     start = pd.Timestamp(rec["start"])
     panel = load_panel(market, None, s.lab.history_start, LOAD_UNTIL)   # every stored day
-    panel = attach_events(panel, market, LOAD_UNTIL)     # ETFs file nothing: KR ETF unchanged
+    if event_rules:             # price-only forward tests never depend on the filings store
+        panel = attach_events(panel, market, LOAD_UNTIL)
     cal = panel.close.index
     days = cal[cal >= start]
     if len(days) == 0:

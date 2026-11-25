@@ -91,8 +91,10 @@ def collect_events(market: str = typer.Option(..., help="kr | us"),
     """Company filings (DART) for the swing universe stocks (resumable per symbol)."""
     s = pipeline.collect_events(market, limit)
     typer.echo(f"symbols {s['symbols']}, filings {s['filings']} | complete {s['complete']}, "
-               f"unmapped {s['unmapped']}" + (f" | sizes {s['sizes_added']}" if "sizes_added" in s else "") + (" | DART rate limit hit: rerun later"
-                                              if s["rate_limited"] else ""))
+               f"unmapped {s['unmapped']}" + (f" | sizes {s['sizes_added']}" if "sizes_added" in s else "")
+               + (f" | sizes stopped ({s['sizes_stopped']}): rerun later"
+                  if s.get("sizes_stopped") else "")
+               + (" | DART rate limit hit: rerun later" if s["rate_limited"] else ""))
 
 
 @app.command()
@@ -109,8 +111,9 @@ def events(market: str = typer.Option(..., help="kr | us"),
     if t:
         dt = t.get("delisted_targets", 0)
         cov = f"{t.get('delisted_mapped', 0) / dt:.2f}" if dt else "n/a"
+        lbl = "delisted" if market == "kr" else "ticker->CIK mapping"
         typer.echo(f"targets {t.get('targets', 0)}, mapped {t.get('mapped', 0)}, incomplete "
-                   f"{r['incomplete']} | delisted {dt}, mapped {t.get('delisted_mapped', 0)} "
+                   f"{r['incomplete']} | {lbl} {dt}, mapped {t.get('delisted_mapped', 0)} "
                    f"(coverage {cov})")
     else:
         typer.echo("targets: none recorded (run `lab collect-events`)")

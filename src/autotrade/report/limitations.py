@@ -49,9 +49,11 @@ def _event_lines(market: str) -> list[str]:
         t = {}
     total = int(t.get("delisted_targets") or 0) if isinstance(t, dict) else 0
     if total > 0:
-        out.append(f"상폐 종목 공시 매핑률 {int(t.get('delisted_mapped') or 0) / total:.0%}")
+        lbl = "상폐 종목 공시 매핑률" if market == "kr" else "티커→CIK 매핑 커버리지(coverage)"
+        out.append(f"{lbl} {int(t.get('delisted_mapped') or 0) / total:.0%}")
     else:
-        out.append("상폐 종목 공시 매핑률 기록 없음(상폐 대상 0 또는 targets.json 없음)")
+        out.append("상폐 종목 공시 매핑률 기록 없음(상폐 대상 0 또는 targets.json 없음)" if market == "kr"
+                   else "티커→CIK 매핑 커버리지(coverage) 기록 없음(targets.json 없음)")
     return out
 
 

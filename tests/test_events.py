@@ -345,9 +345,9 @@ def test_panel_attaches_only_events_up_to_end(cli_env):
     cal = s.calendar
     i = cal.get_loc(pd.Timestamp(t1))
     kr_filings(("in", "A01", nth(cal, i - 3), BUYBACK), ("out", "A02", nth(cal, i + 1), BUYBACK))
-    screen_panel = pipeline._panel(s, t1)
+    screen_panel = pipeline._panel(s, t1, True)
     assert list(screen_panel.events["filing_id"]) == ["in"]
-    valid_panel = pipeline._panel(s, s.periods.valid[1])
+    valid_panel = pipeline._panel(s, s.periods.valid[1], True)
     assert list(valid_panel.events["filing_id"]) == ["in", "out"]
 
 
@@ -362,12 +362,12 @@ def test_validate_panel_has_no_sealed_period_event(cli_env):
     assert cal[j + 1] == pd.Timestamp(s0)
     kr_filings(("at_v1", "A01", nth(cal, j), BUYBACK), ("sealed0", "A02", nth(cal, j + 1), BUYBACK),
                ("sealed5", "A03", nth(cal, j + 5), "감자결정"))
-    ev = pipeline._panel(s, v1).events
+    ev = pipeline._panel(s, v1, True).events
     assert list(ev["filing_id"]) == ["at_v1"]
     assert (ev["signal_date"] < pd.Timestamp(s0)).all()
 
 
-def test_forward_panel_carries_events(cli_env, monkeypatch):
+def test_forward_price_only_skips_events(cli_env, monkeypatch):
     from tests.test_forward import register_after_cutoff, screened_and_validated
     screened_and_validated()
     register_after_cutoff(cli_env, monkeypatch)
@@ -382,7 +382,7 @@ def test_forward_panel_carries_events(cli_env, monkeypatch):
         return out
     monkeypatch.setattr(forward, "attach_events", spy)
     forward.run("swing", "kr")
-    assert len(seen) == 1 and list(seen[0]["filing_id"]) == ["fw"]
+    assert seen == []                    # price-only registration: no event attachment
 
 
 @pytest.mark.parametrize("family", sorted(set(SWING_FAMILIES) - EVENT_FAMILIES))

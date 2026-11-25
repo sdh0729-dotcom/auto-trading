@@ -109,6 +109,22 @@ def test_buyback_sums_common_and_other(env):
     assert c.calls == [("detail", "tsstkAqDecsn.json", "C1", date(2024, 1, 4), date(2024, 3, 4))]
 
 
+def test_trust_contract_buyback_uses_the_trust_endpoint(env):
+    TRUST = "주요사항보고서(자기주식취득신탁계약체결결정)"
+    append_filings("kr", filings(("T1", "A", "C1", TRUST, date(2024, 1, 4)),
+                                 ("B1", "A", "C1", BUY, date(2024, 1, 5)),
+                                 ("R1", "A", "C1", RIGHTS, date(2024, 1, 6))))
+    c = Fake(detail={
+        ("tsstkAqTrctrCnsDecsn.json", "C1"): [{"rcept_no": "T1", "ctr_prc": "300,000,000,000"}],
+        ("tsstkAqDecsn.json", "C1"): [{"rcept_no": "B1", "aqpln_prc_ostk": "5"}]})
+    collect_sizes_kr(c)
+    s = load_sizes("kr").set_index("filing_id")
+    assert s.loc["T1", "value"] == 300_000_000_000 and s.loc["T1", "measure"] == "buyback_krw"
+    assert s.loc["B1", "value"] == 5
+    eps = [x[1] for x in c.calls]
+    assert eps == ["tsstkAqDecsn.json", "tsstkAqTrctrCnsDecsn.json", "piicDecsn.json"]
+
+
 def test_size_pass_records_nan_on_failure_and_never_refetches(env):
     append_filings("kr", filings(("B1", "A", "C1", BUY, date(2024, 1, 4)),
                                  ("S1", "A", "C1", SUP, date(2024, 1, 5)),

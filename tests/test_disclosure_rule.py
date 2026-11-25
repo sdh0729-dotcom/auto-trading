@@ -14,7 +14,9 @@ from autotrade import forward, pipeline
 from autotrade.cli import app
 from autotrade.config import load_market_raw, repo_root
 from autotrade.disclosure import events as E
-from autotrade.disclosure.store import state_path, targets_path, write_json
+from autotrade.disclosure.sizes_kr import size_targets
+from autotrade.disclosure.store import (append_sizes, filings_path, load_filings, sizes_path,
+                                        state_path, targets_path, write_json)
 from autotrade.report import limitations
 from autotrade.rules.base import atr_stop
 from autotrade.rules.registry import EVENT_FAMILIES, SWING_FAMILIES
@@ -139,9 +141,19 @@ def event_env(cli_env, tmp_path, monkeypatch):
         for i in range(30 + j, len(cal) - 1, 25):
             rows.append((f"{sym}-{i}", sym, nth(cal, i), BUYBACK))
     kr_filings(*rows)
+    fill_sizes()
     complete(STOCKS)
     cli_env.config = cfg
     return cli_env
+
+
+def fill_sizes(skip=0):
+    """A size row for every size target (the gate wants the size pass finished); the last
+    `skip` targets get none."""
+    t = size_targets(load_filings("kr"))
+    t = t.iloc[:len(t) - skip]
+    append_sizes("kr", pd.DataFrame({"filing_id": t["filing_id"], "measure": t["measure"],
+                                     "value": 1e9}))
 
 
 def complete(symbols, delisted_targets=0, delisted_mapped=0, done=None):
@@ -181,6 +193,37 @@ def test_screen_refuses_incomplete_events(event_env):
     fails(SCREEN + ["--family", "disclosure"], "coverage", "50%")
     assert not (event_env.research / "experiments.jsonl").exists()
     assert not (event_env.research / "periods-swing-kr.json").exists()
+
+
+def test_screen_refuses_unfinished_size_pass(event_env):
+    sizes_path("kr").unlink()
+    fill_sizes(skip=3)
+    fails(SCREEN + ["--family", "disclosure"], "3 kr filings still need size details",
+          "collect-events")
+    assert not (event_env.research / "experiments.jsonl").exists()
+    fill_sizes()                                  # the missing rows arrive -> passes
+    pipeline._refuse_incomplete_events("kr")
+
+
+def test_us_coverage_message_names_the_cik_mapping(event_env):
+    write_json(targets_path("us"), {"symbols": ["X"], "targets": 1, "mapped": 1,
+                                    "delisted_targets": 10, "delisted_mapped": 5})
+    write_json(state_path("us"), {"X": {"done_through": "2026-11-20", "complete": True}})
+    with pytest.raises(pipeline.LabError, match="CIK mapping coverage 50%"):
+        pipeline._refuse_incomplete_events("us")
+
+
+def test_price_only_runs_do_not_touch_the_filings_store(event_env, monkeypatch):
+    filings_path("kr").write_bytes(b"corrupt")
+    (event_env.config / "events" / "kr.yaml").write_text("{{ not yaml", encoding="utf-8")
+    run(SCREEN + ["--family", "breakout"])
+    run(VALIDATE)
+    start = periods_of(event_env).sealed[1] + timedelta(days=1)
+    monkeypatch.setattr(forward, "_today", lambda market: start)
+    run(["forward-register", "--market", "kr"])
+    forward.run("swing", "kr")                    # price-only forward needs no DART data
+    r = CliRunner().invoke(app, SCREEN + ["--family", "disclosure"])
+    assert r.exit_code == 1 and "unreadable" in r.output, r.output
 
 
 def test_screen_refuses_unfinished_targets(event_env):
@@ -300,7 +343,12 @@ def test_forward_stores_and_checks_the_table(event_env, monkeypatch):
     run(["forward-register", "--market", "kr"])
     rec = json.loads((event_env.research / "forward-swing-kr.json").read_text("utf-8"))
     assert rec["rules"][0]["events_table"] == E.events_table_hash("kr")
+    seen = []
+    real = forward.attach_events
+    monkeypatch.setattr(forward, "attach_events",
+                        lambda *a: seen.append(1) or real(*a))
     forward.run("swing", "kr")
+    assert seen == [1]                            # an event rule: events attached
     edit_table(event_env)
     fails(["forward", "--market", "kr"], f"events table changed since screen of {rid}")
 

@@ -379,6 +379,12 @@ def recent_negative(panel: Panel, window: int) -> pd.DataFrame:
     return neg.astype(np.int64).rolling(window, min_periods=1).sum().gt(0)
 
 
+def negative_on(panel: Panel) -> pd.DataFrame:
+    """Bool date x symbol on panel.close: True where a direction -1 event has signal_date = t."""
+    ev = _events(panel)
+    return _mark(panel, ev[ev["direction"] == -1])
+
+
 # ---------------------------------------------------------------- report (lab events)
 def report(market: str, calendar: pd.DatetimeIndex, unmatched: int = 20) -> dict:
     """Counts by event x signal year (repeats dropped), target coverage and the most

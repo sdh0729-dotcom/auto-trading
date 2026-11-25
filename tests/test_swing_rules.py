@@ -59,8 +59,10 @@ def test_grid_size_capped():
 def test_registry_has_all_families():
     assert set(SWING_FAMILIES) == {"breakout", "ma_trend", "oversold", "momentum",
                                    "reversal", "overnight", "tom", "etf_rotation",
-                                   "disclosure"}
-    assert EVENT_FAMILIES == {"disclosure"}
+                                   "disclosure", "breakout_negf", "ma_trend_negf",
+                                   "momentum_negf", "reversal_negf"}
+    assert EVENT_FAMILIES == {"disclosure", "breakout_negf", "ma_trend_negf",
+                              "momentum_negf", "reversal_negf"}
 
 
 def test_rule_id_stable():

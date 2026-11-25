@@ -233,7 +233,9 @@ def test_unknown_family_lists_events(cli_env):
 def test_screen_events_logs_the_table_hash(event_env):
     run(SCREEN + ["--family", "events"])
     rows = log_rows(event_env)
-    assert set(rows["family"]) == EVENT_FAMILIES and len(rows) == 108
+    assert set(rows["family"]) == EVENT_FAMILIES
+    assert len(rows) == sum(len(SWING_FAMILIES[f].grid()) for f in EVENT_FAMILIES)
+    assert (rows["family"] == "disclosure").sum() == 108
     h = E.events_table_hash("kr")
     assert all(m["events_table"] == h for m in rows["metrics"])
     assert max(m["n_trades"] for m in rows["metrics"]) >= 30

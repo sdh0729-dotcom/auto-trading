@@ -90,7 +90,7 @@ def collect_events(market: str = typer.Option(..., help="kr | us"),
     """Company filings (DART) for the swing universe stocks (resumable per symbol)."""
     s = pipeline.collect_events(market, limit)
     typer.echo(f"symbols {s['symbols']}, filings {s['filings']} | complete {s['complete']}, "
-               f"unmapped {s['unmapped']}" + (" | DART rate limit hit: rerun later"
+               f"unmapped {s['unmapped']}" + (f" | sizes {s['sizes_added']}" if "sizes_added" in s else "") + (" | DART rate limit hit: rerun later"
                                               if s["rate_limited"] else ""))
 
 

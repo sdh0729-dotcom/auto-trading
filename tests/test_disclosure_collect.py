@@ -38,6 +38,12 @@ class FakeClient:
                              "stock_code": ["000001", "000002", ""],
                              "corp_name": ["a", "b", "c"]})
 
+    def detail(self, endpoint, corp_code, start, end):
+        return []
+
+    def document(self, rcept_no):
+        return b""
+
     def list_filings(self, corp_code, start, end, kind):
         self.calls.append((corp_code, start, end, kind))
         if self.hook:

@@ -1,0 +1,21 @@
+# KR event table, first draft (spec 2026-11-24-disclosure-lab-design.md §6.1).
+# Patterns are matched (re.search) against the correction-stripped title; first match wins.
+# Drafts: to be finalized against real title frequencies BEFORE any return is seen (§10-1 #6).
+# Changing this file after screening starts = a new experiment (events_table hash changes).
+repeat_days: 20
+negative_window: 20
+events:
+  - {name: withdrawal, direction: 0, match: "철회"}
+  - {name: buyback, direction: 1, match: "자기주식취득(신탁계약체결)?결정", size: buyback_krw, size_min: 1.0}
+  - {name: supply_contract, direction: 1, match: "단일판매[ㆍ·]?공급계약체결", size: supply_revenue_ratio, size_min: 0.10}
+  - {name: bonus_issue, direction: 1, match: "무상증자결정"}
+  - {name: rights_offering, direction: -1, match: "유상증자결정", size: rights_dilution, size_min: 0.10}
+  - {name: convertible_bond, direction: -1, match: "(전환사채권|신주인수권부사채권|교환사채권)발행결정"}
+  - {name: capital_reduction, direction: -1, match: "감자결정"}
+  - {name: embezzlement_breach, direction: -1, match: "횡령|배임"}
+  - {name: unfaithful_disclosure, direction: -1, match: "불성실공시법인지정"}
+  - {name: administrative_issue, direction: -1, match: "관리종목지정"}
+  - {name: investment_warning, direction: -1, match: "투자(경고|위험)종목지정"}
+  - {name: trading_halt, direction: -1, match: "매매거래정지"}
+  - {name: largest_shareholder_change, direction: -1, match: "최대주주변경"}
+bundles: {bundle_a: [buyback], bundle_b: [supply_contract]}

@@ -46,6 +46,7 @@ from autotrade.data.sessions import auction_lead_minutes
 from autotrade.data.store import (calendar, data_root, load_meta, load_bars, load_daily, load_panel,
                                   save_meta, stored_symbols, trading_dates)
 from autotrade.disclosure.collect_kr import collect_events_kr, event_targets
+from autotrade.disclosure.sizes_kr import collect_sizes_kr
 from autotrade.disclosure.dart import make_dart_client_from_env
 from autotrade.disclosure.store import lock_path as events_lock_path
 from autotrade.report import (CONFIDENCE_FORMULAS, RuleCard, limitations, write_leaderboard,
@@ -569,8 +570,13 @@ def collect_events(market: str, limit: int | None = None) -> dict:
         delisted = {str(s) for s in meta.index[meta["delisted"].astype(bool)]}
         client = make_dart_client_from_env()
         try:
-            return collect_events_kr(client, syms, today=market_today(market).date(),
-                                     delisted=delisted, limit=limit)
+            out = collect_events_kr(client, syms, today=market_today(market).date(),
+                                    delisted=delisted, limit=limit)
+            if not out["rate_limited"]:             # sizes after listing, same run
+                sz = collect_sizes_kr(client)
+                out["sizes_added"] = sz["added"]
+                out["rate_limited"] = sz["rate_limited"]
+            return out
         except httpx.HTTPError as e:
             raise LabError(f"collect-events failed: network error ({type(e).__name__})") from e
 

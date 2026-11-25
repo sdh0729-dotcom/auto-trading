@@ -73,3 +73,28 @@ def incomplete_targets(market: str) -> list[str]:
     skip = set(t.get("unmapped", []))
     return [s for s in t.get("symbols", [])
             if s not in skip and not state.get(s, {}).get("complete")]
+
+
+SIZE_COLUMNS = ["filing_id", "measure", "value"]
+
+
+def sizes_path(market: str) -> Path:
+    return events_root(market) / "sizes.parquet"
+
+
+def load_sizes(market: str) -> pd.DataFrame:
+    p = sizes_path(market)
+    if not p.exists():
+        return pd.DataFrame({"filing_id": pd.Series(dtype=str), "measure": pd.Series(dtype=str),
+                             "value": pd.Series(dtype=float)})
+    return pd.read_parquet(p)
+
+
+def append_sizes(market: str, df: pd.DataFrame) -> None:
+    """Add (filing_id, measure, value) rows; first stored row per (filing_id, measure) wins
+    (NaN rows are kept: they mark 'tried, unreadable' so nothing is refetched). Atomic."""
+    if df.empty:
+        return
+    merged = pd.concat([load_sizes(market), df[SIZE_COLUMNS]], ignore_index=True)
+    merged = merged.drop_duplicates(["filing_id", "measure"], keep="first").reset_index(drop=True)
+    write_parquet_atomic(merged, sizes_path(market))

@@ -70,10 +70,12 @@ def test_parse_supply_ratio_missing_returns_none():
     assert parse_supply_ratio(b"not a zip") is None
 
 
-def test_size_patterns_and_targets_strip_corrections():
+def test_size_patterns_and_targets_skip_corrections():
     assert set(size_patterns("kr")) == {"buyback_krw", "supply_revenue_ratio", "rights_dilution"}
-    f = filings(("1", "A", "C1", "[기재정정]" + SUP, date(2024, 1, 2)),
-                ("2", "A", "C1", "[첨부정정][기재정정] " + BUY, date(2024, 1, 3)),
+    f = filings(("1", "A", "C1", SUP + "(자율공시)", date(2024, 1, 2)),
+                ("2", "A", "C1", BUY, date(2024, 1, 3)),
+                ("6", "A", "C1", "[기재정정]" + SUP, date(2024, 1, 2)),
+                ("7", "A", "C1", "[첨부정정][기재정정] " + BUY, date(2024, 1, 3)),
                 ("3", "A", "C1", RIGHTS, date(2024, 1, 4)),
                 ("4", "A", "C1", "주요사항보고서(무상증자결정)", date(2024, 1, 5)),
                 ("5", "A", "C1", "[철회]" + BUY, date(2024, 1, 6)))
@@ -112,7 +114,7 @@ def test_size_pass_records_nan_on_failure_and_never_refetches(env):
                                  ("S1", "A", "C1", SUP, date(2024, 1, 5)),
                                  ("S2", "A", "C1", SUP, date(2024, 1, 6)),
                                  ("R1", "A", "C1", RIGHTS, date(2024, 1, 7))))
-    c = Fake(docs={"S1": zipped("<p>nothing</p>")}, fail={"S2": DartError("800", "x")})
+    c = Fake(docs={"S1": zipped("<p>nothing</p>")}, fail={"S2": DartError("101", "x")})
     out = collect_sizes_kr(c)
     s = load_sizes("kr").set_index("filing_id")["value"]
     assert len(s) == 4 and s.isna().all() and out["rate_limited"] is False
@@ -136,3 +138,34 @@ def test_size_pass_resumes_after_rate_limit(env):
     s = load_sizes("kr").set_index("filing_id")["value"]
     assert s["S1"] == pytest.approx(0.2) and s["S2"] == pytest.approx(0.05)
     assert math.isnan(s["R1"])
+
+
+@pytest.mark.parametrize("status", ["http", "800", "900"])
+def test_transient_error_on_document_leaves_no_row_and_retries(env, status):
+    append_filings("kr", filings(("S1", "A", "C1", SUP, date(2024, 1, 5)),
+                                 ("S2", "A", "C1", SUP, date(2024, 1, 6))))
+    docs = {"S1": zipped("매출액대비(%) 20"), "S2": zipped("매출액대비(%) 5")}
+    out = collect_sizes_kr(Fake(docs=docs, fail={"S2": DartError(status, "x")}))
+    assert out["stopped"] == "transient" and out["rate_limited"] is False
+    assert list(load_sizes("kr")["filing_id"]) == ["S1"]
+    c = Fake(docs=docs)
+    out = collect_sizes_kr(c)
+    assert out["stopped"] is None and c.calls == [("document", "S2")]
+    assert load_sizes("kr").set_index("filing_id")["value"]["S2"] == pytest.approx(0.05)
+
+
+def test_transient_error_on_detail_span_leaves_no_rows_for_corp(env):
+    append_filings("kr", filings(("B1", "A", "C1", BUY, date(2024, 1, 4)),
+                                 ("B2", "A", "C1", BUY, date(2024, 3, 4))))
+    out = collect_sizes_kr(Fake(fail={"detail": DartError("800", "maintenance")}))
+    assert out["stopped"] == "transient" and load_sizes("kr").empty
+    c = Fake(detail={("tsstkAqDecsn.json", "C1"): [{"rcept_no": "B1", "aqpln_prc_ostk": "7"}]})
+    collect_sizes_kr(c)
+    s = load_sizes("kr").set_index("filing_id")["value"]
+    assert s["B1"] == 7 and math.isnan(s["B2"])
+
+
+def test_non_transient_dart_error_is_nan(env):
+    append_filings("kr", filings(("S1", "A", "C1", SUP, date(2024, 1, 5))))
+    out = collect_sizes_kr(Fake(fail={"S1": DartError("101", "bad")}))
+    assert out["stopped"] is None and math.isnan(load_sizes("kr")["value"].iloc[0])

@@ -1,25 +1,31 @@
 """KR event sizes: buyback amount, supply-contract revenue ratio, rights-offering dilution.
 
-Output: events/sizes.parquet (filing_id, measure, value). value is NaN when parsing failed;
-the row is still stored so the filing is never refetched. Fetch order (spec §10-1 #8):
-buyback -> supply contract -> rights offering. A DartRateLimited stops the pass cleanly.
+Output: events/sizes.parquet (filing_id, measure, value). Fetch order (spec §10-1 #8):
+buyback -> supply contract -> rights offering.
 
-Endpoints / fields (DART OpenAPI "주요사항보고서 주요정보"). NONE of these could be confirmed
-against the live guide or a real response in this task (tests never hit the network):
+NaN vs. retry. A NaN row is written only for DETERMINISTIC outcomes (and is then never
+refetched): parse_supply_ratio returns None, the filing's row is absent from a successful
+detail reply, a value is unparseable, or DART answers a non-transient status other than rate
+limit (e.g. 100/101 bad parameters). TRANSIENT failures (DartError status "http", "800"
+maintenance, "900" unknown) and DartRateLimited write NO row for the affected filing(s) and
+stop the pass cleanly (rows done so far are flushed): `rate_limited=True` for the limit,
+`stopped="transient"` otherwise; the next run retries.
+
+Endpoints / fields (DART OpenAPI), confirmed against real DART on 2026-11-25 by the controller:
  - buyback   `tsstkAqDecsn.json` (자기주식 취득 결정): `aqpln_prc_ostk` (common) +
    `aqpln_prc_estk` (other) planned acquisition amount, KRW. Value = sum of the present ones.
-   -- to be confirmed on first real run
+   (Confirmed on a Samsung filing, 2024-11.)
  - rights    `piicDecsn.json` (유상증자 결정): new shares `nstk_ostk_cnt` + `nstk_estk_cnt`,
-   shares before `bfic_tisstk_ostk` + `bfic_tisstk_estk`. dilution = new / existing, common and
-   other shares summed on both sides (a missing side counts 0; existing <= 0 -> NaN).
-   -- to be confirmed on first real run
+   shares before `bfic_tisstk_ostk` + `bfic_tisstk_estk` (comma strings, "-" when blank).
+   dilution = new / existing, common and other summed on both sides (a missing side counts 0;
+   existing <= 0 -> NaN). Rows also carry `ic_mthn` (e.g. "제3자배정증자"), not used here.
  - supply    no structured API: `document(rcept_no)` zip -> text; the figure after the
    "매출액 대비(%)" label (spaces / line breaks / tags may sit between its characters).
-   -- label wording and layout to be confirmed on first real run
+   Worked on two real 단일판매ㆍ공급계약체결(자율공시) documents (HD현대중공업): 0.0241, 0.1657.
 Detail rows are matched to filings by `rcept_no`. One detail call per corp over the span
-of that corp's target filing dates; if the span call fails to list a filing it is recorded NaN.
-Titles are matched on the correction-stripped title (leading `[...]` tags removed), also with
-internal whitespace removed. Titles containing 철회 (withdrawals) get no size.
+of that corp's target filing dates.
+Targets: titles matched on the title with whitespace also removed; correction-tagged filings
+(leading `[...]`) and titles containing 철회 get no size (Task 4 drops corrections).
 """
 from __future__ import annotations
 
@@ -59,8 +65,8 @@ def size_targets(filings: pd.DataFrame, market: str = "kr") -> pd.DataFrame:
     rows = []
     for rec in filings.to_dict("records"):
         t = strip_corrections(rec["title"])
-        if "철회" in str(rec["title"]):
-            continue
+        if t != str(rec["title"]).strip() or "철회" in str(rec["title"]):
+            continue                    # corrections (leading [..] tag) and withdrawals
         compact = re.sub(r"\s+", "", t)
         for m in ORDER:
             if m in pats and (pats[m].search(t) or pats[m].search(compact)):
@@ -135,12 +141,16 @@ def parse_supply_ratio(doc: bytes) -> float | None:
         return None
 
 
+TRANSIENT = ("http", "800", "900")
+
+
 def collect_sizes_kr(client, limit: int | None = None) -> dict:
-    """Fetch sizes for target filings not yet in sizes.parquet. `limit` caps API calls."""
+    """Fetch sizes for target filings not yet in sizes.parquet. `limit` caps API calls.
+    See the module docstring for NaN vs. transient-stop semantics."""
     targets = size_targets(load_filings("kr"))
     have = load_sizes("kr")
     todo = targets[~targets["filing_id"].isin(set(have["filing_id"]))]
-    out = {"targets": len(targets), "added": 0, "rate_limited": False}
+    out = {"targets": len(targets), "added": 0, "rate_limited": False, "stopped": None}
     calls = 0
     batch: list[dict] = []
 
@@ -163,7 +173,9 @@ def collect_sizes_kr(client, limit: int | None = None) -> dict:
                         v = parse_supply_ratio(client.document(rec["filing_id"]))
                     except DartRateLimited:
                         raise
-                    except DartError:
+                    except DartError as e:
+                        if e.status in TRANSIENT:
+                            raise
                         v = None
                     batch.append({"filing_id": rec["filing_id"], "measure": measure,
                                   "value": nan if v is None else v})
@@ -179,7 +191,9 @@ def collect_sizes_kr(client, limit: int | None = None) -> dict:
                     rows = client.detail(endpoint, corp, min(g["filed_date"]), max(g["filed_date"]))
                 except DartRateLimited:
                     raise
-                except DartError:
+                except DartError as e:
+                    if e.status in TRANSIENT:
+                        raise
                     rows = []
                 by = {str(r.get("rcept_no")): r for r in rows}
                 for rec in g.to_dict("records"):
@@ -189,6 +203,8 @@ def collect_sizes_kr(client, limit: int | None = None) -> dict:
                 flush()
     except DartRateLimited:
         out["rate_limited"] = True
+    except DartError:
+        out["stopped"] = "transient"
     finally:
         flush()
     return out

@@ -576,6 +576,7 @@ def collect_events(market: str, limit: int | None = None) -> dict:
                 sz = collect_sizes_kr(client)
                 out["sizes_added"] = sz["added"]
                 out["rate_limited"] = sz["rate_limited"]
+                out["sizes_stopped"] = sz["stopped"]
             return out
         except httpx.HTTPError as e:
             raise LabError(f"collect-events failed: network error ({type(e).__name__})") from e

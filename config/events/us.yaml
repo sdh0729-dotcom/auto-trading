@@ -1,0 +1,16 @@
+# US event table, first draft (spec 2026-11-24-disclosure-lab-design.md §6.1, §10-1 #2, #7).
+# Patterns are matched (re.search) against "<form>|<items>" (items without spaces), e.g.
+# "8-K|1.01,9.01", "4|", "424B5|"; first match wins (negatives first: an 8-K carrying both
+# 1.01 and 3.01/4.02 is the negative event). Amendments (form ending in /A) are corrections,
+# never events. `require_positive: <column>`: the row matches only when that filing column
+# is > 0 (Form 4 rows without code-P open-market buys carry NaN insider_usd).
+# Changing this file after screening starts = a new experiment (events_table hash changes).
+repeat_days: 20
+negative_window: 20
+events:
+  - {name: 8k_402, direction: -1, match: '^8-K\|(.*,)?4\.02(,|$)'}
+  - {name: 8k_301, direction: -1, match: '^8-K\|(.*,)?3\.01(,|$)'}
+  - {name: 8k_101, direction: 1, match: '^8-K\|(.*,)?1\.01(,|$)'}
+  - {name: offering_424b, direction: 0, match: '^424B[1-8]\|'}
+  - {name: insider_buy, direction: 1, match: '^4\|', require_positive: insider_usd, size: insider_usd, size_min: 100000}
+bundles: {bundle_a: [8k_101], bundle_b: [insider_buy]}

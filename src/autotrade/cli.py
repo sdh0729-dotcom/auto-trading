@@ -10,12 +10,14 @@ import typer
 
 from autotrade import pipeline
 from autotrade.config import ConfigError, load_env
+from autotrade.disclosure.dart import DartError
+from autotrade.disclosure.edgar import EdgarError
 from autotrade.validate.seal import SealViolation
 
 app = typer.Typer(no_args_is_help=True, add_completion=False,
                   help="Auto-trading research lab (read-only market data, no orders).")
 
-EXPECTED_ERRORS = (pipeline.LabError, ConfigError, SealViolation)
+EXPECTED_ERRORS = (pipeline.LabError, ConfigError, SealViolation, DartError, EdgarError)
 
 
 @app.callback()
@@ -82,6 +84,45 @@ def collect_minute(market: str = typer.Option(..., help="kr | us"),
                f"not found {s['not_found']}, failed {s['failed']}")
 
 
+@app.command("collect-events")
+@_expected_errors
+def collect_events(market: str = typer.Option(..., help="kr | us"),
+                   limit: Optional[int] = typer.Option(None, help="first N symbols only")):
+    """Company filings (DART) for the swing universe stocks (resumable per symbol)."""
+    s = pipeline.collect_events(market, limit)
+    typer.echo(f"symbols {s['symbols']}, filings {s['filings']} | complete {s['complete']}, "
+               f"unmapped {s['unmapped']}" + (f" | sizes {s['sizes_added']}" if "sizes_added" in s else "")
+               + (f" | sizes stopped ({s['sizes_stopped']}): rerun later"
+                  if s.get("sizes_stopped") else "")
+               + (" | DART rate limit hit: rerun later" if s["rate_limited"] else ""))
+
+
+@app.command()
+@_expected_errors
+def events(market: str = typer.Option(..., help="kr | us"),
+           unmatched: int = typer.Option(20, help="show the N most frequent unmatched titles")):
+    """Classified filings: events by year, target coverage, frequent unmatched titles."""
+    r = pipeline.events_report(market, unmatched)
+    typer.echo(f"filings {r['filings']}, events {r['events']} (repeats dropped), corrections "
+               f"{r['corrections']}, unmatched {r['unmatched_total']}")
+    if len(r["counts"]):
+        _show(r["counts"].rename_axis(columns=None).reset_index())
+    t = r["targets"]
+    if t:
+        dt = t.get("delisted_targets", 0)
+        cov = f"{t.get('delisted_mapped', 0) / dt:.2f}" if dt else "n/a"
+        lbl = "delisted" if market == "kr" else "ticker->CIK mapping"
+        typer.echo(f"targets {t.get('targets', 0)}, mapped {t.get('mapped', 0)}, incomplete "
+                   f"{r['incomplete']} | {lbl} {dt}, mapped {t.get('delisted_mapped', 0)} "
+                   f"(coverage {cov})")
+    else:
+        typer.echo("targets: none recorded (run `lab collect-events`)")
+    if r["unmatched"]:
+        typer.echo(f"top {len(r['unmatched'])} unmatched:")
+        for title, n in r["unmatched"]:
+            typer.echo(f"  {n:6d}  {title}")
+
+
 @app.command()
 @_expected_errors
 def collect(market: str = typer.Option(..., help="kr | us"),
@@ -123,7 +164,8 @@ def universe(market: str = typer.Option(..., help="kr | us"),
 @app.command()
 @_expected_errors
 def screen(pocket: str = typer.Option("swing"), market: str = typer.Option(..., help="kr | us"),
-           family: str = typer.Option("all", help="family name or all")):
+           family: str = typer.Option(
+               "all", help="family name, all (price families) or events (filing families)")):
     """Screen rule families on the train period (fixed amount)."""
     df = pipeline.screen(pocket, market, family)
     _show(df[["rule_id", "n_trades", "mean_net_r", "t_stat", "profit_factor", "win_rate",

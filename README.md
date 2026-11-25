@@ -21,6 +21,11 @@ uv run lab --help      # sync → collect → screen → validate → verify --f
   표시 `.limited` 없음, 수집 중 아님) `uv run lab screen --pocket daytrade --market kr|us` →
   `uv run lab validate --pocket daytrade --market kr|us`. 그 전에는 둘 다 거부합니다.
   단타 `verify --final`(분봉 Nautilus)은 아직 없습니다(계획 2b). 한계는 리포트의 한계 목록을 보세요.
+- 공시 연구(스윙): `uv run lab collect-events --market kr|us`로 공시를 모읍니다(이어받기·잠금; 국내는 매일
+  `scripts/daily_kr.sh`가 이어받되, 실패해도 가상 운용은 계속). `uv run lab events --market kr --unmatched N`은
+  분류표에 안 걸린 공시 제목 빈도를 보여 줍니다. `uv run lab screen --family events`가 공시 규칙군 전체를 돌리고,
+  `--family all`은 가격 규칙군만 돌립니다. `.env`에 `DART_API_KEY`(국내)·`SEC_USER_AGENT`(미국)가 필요합니다.
+  공시 데이터를 포함한 `data/`는 저장소에 올리지 않습니다. 설계: `docs/superpowers/specs/2026-11-24-disclosure-lab-design.md`
 - 설계: `docs/superpowers/specs/` · 선행 조사: `research/2026-11-19-prior-art.md`
 
 투자 권유가 아닙니다. 연구 결과는 과거 데이터 기반이며 미래 수익을 보장하지 않습니다.

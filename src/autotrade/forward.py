@@ -8,6 +8,11 @@ lie after the period record's data cutoff (nothing on or after it fed screen / v
 universe, costs and sizing as validate. History before the start (including the sealed
 period) is read only as indicator warm-up: no metric covers a day before the start, so the
 seal stays meaningful. No order API is involved.
+
+Event-family rules (registry.EVENT_FAMILIES) are registered and run only on a finished
+filing collection (`pipeline._refuse_incomplete_events`); `register` stores the event-table
+hash of the rule's validate row (`events_table`) and refuses one differing from the current
+table; `run` refuses a rule whose stored hash differs from the current table.
 """
 from __future__ import annotations
 
@@ -23,6 +28,8 @@ import pandas as pd
 
 from autotrade import pipeline as P
 from autotrade.data.store import load_bars, load_panel
+from autotrade.disclosure.events import attach_events
+from autotrade.rules.registry import EVENT_FAMILIES
 from autotrade.screen.simulate import simulate
 from autotrade.sizing import run_portfolio
 from autotrade.validate.criteria import period_equity
@@ -65,13 +72,19 @@ def register(pocket: str, market: str) -> dict:
     if not ids:
         raise P.LabError(f"the latest validate of {pocket}/{market} recommended no rule")
     val = rows[(rows["stage"] == "validate") & rows["period"].map(lambda p: list(p) == valid)]
+    picked = [val[val["rule_id"] == rid].iloc[-1] for rid in ids]
+    if any(row["family"] in EVENT_FAMILIES for row in picked):
+        P._refuse_incomplete_events(market)
     rules = []
-    for rid in ids:
-        row = val[val["rule_id"] == rid].iloc[-1]
+    for rid, row in zip(ids, picked):
         rule = P._rule(P._families(pocket), row["family"], row["params"], rid)   # rebuildable
-        rules.append({"rule_id": rule.rule_id, "family": row["family"],
-                      "params": dict(row["params"]),
-                      "valid_return": row["metrics"].get("valid_return")})
+        entry = {"rule_id": rule.rule_id, "family": row["family"],
+                 "params": dict(row["params"]),
+                 "valid_return": row["metrics"].get("valid_return")}
+        if row["family"] in EVENT_FAMILIES:
+            P._refuse_changed_table(market, rid, row["metrics"])
+            entry["events_table"] = row["metrics"]["events_table"]
+        rules.append(entry)
     rec = {"version": 1, "pocket": pocket, "market": market, "start": start.isoformat(),
            "registered_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
            "data_cutoff": s.record.data_cutoff.isoformat(),
@@ -111,8 +124,15 @@ def _monthly(equity: pd.Series, base: float) -> pd.Series:
 def run(pocket: str, market: str) -> ForwardResult:
     rec = load_record(pocket, market)
     s = P._setup(pocket, market)
+    event_rules = [r for r in rec["rules"] if r["family"] in EVENT_FAMILIES]
+    if event_rules:
+        P._refuse_incomplete_events(market)
+        for r in event_rules:
+            P._refuse_changed_table(market, r["rule_id"], r)
     start = pd.Timestamp(rec["start"])
     panel = load_panel(market, None, s.lab.history_start, LOAD_UNTIL)   # every stored day
+    if event_rules:             # price-only forward tests never depend on the filings store
+        panel = attach_events(panel, market, LOAD_UNTIL)
     cal = panel.close.index
     days = cal[cal >= start]
     if len(days) == 0:

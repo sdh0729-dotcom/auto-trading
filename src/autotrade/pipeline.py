@@ -43,11 +43,20 @@ from autotrade.data.minute_store import minute_bounds, minute_calendar, minute_d
 from autotrade.data.krx_overlay import refresh_overlays, save_overlay_record
 from autotrade.data.quality import check_daily, hard_issues
 from autotrade.data.sessions import auction_lead_minutes
-from autotrade.data.store import (calendar, data_root, load_bars, load_daily, load_panel,
+from autotrade.data.store import (calendar, data_root, load_meta, load_bars, load_daily, load_panel,
                                   save_meta, stored_symbols, trading_dates)
+from autotrade.disclosure.collect_kr import collect_events_kr, event_targets
+from autotrade.disclosure.collect_us import collect_events_us
+from autotrade.disclosure.edgar import make_edgar_client_from_env
+from autotrade.disclosure.sizes_kr import collect_sizes_kr, size_targets
+from autotrade.disclosure.dart import make_dart_client_from_env
+from autotrade.disclosure.events import attach_events, events_table_hash
+from autotrade.disclosure.events import report as events_report_of
+from autotrade.disclosure.store import incomplete_targets, load_filings, load_sizes, read_json, targets_path
+from autotrade.disclosure.store import lock_path as events_lock_path
 from autotrade.report import (CONFIDENCE_FORMULAS, RuleCard, limitations, write_leaderboard,
                               write_rule_card)
-from autotrade.rules.registry import DAYTRADE_FAMILIES, SWING_FAMILIES
+from autotrade.rules.registry import DAYTRADE_FAMILIES, EVENT_FAMILIES, SWING_FAMILIES
 from autotrade.screen.intraday import SessionRules
 from autotrade.screen.run import (MIN_TRAIN_TRADES, intraday_trades, screen_family,
                                   screen_intraday)
@@ -76,6 +85,7 @@ FEATURE_WARMUP_DAYS = 30         # calendar days of minute bars before valid for
 # market's minute_start (Toss's history can begin a few days late) before screen / validate
 # call its minute history short
 MINUTE_START_TOLERANCE_DAYS = 10
+MIN_DELISTED_COVERAGE = 0.80     # spec §10-1 #5: delisted-target corp-code mapping
 MAX_COMMISSION = 0.01            # a commission ratio >= 1% is almost surely a percent typo
 PARITY_MISMATCHES_KEPT = 20
 FAMILIES = {"swing": SWING_FAMILIES, "daytrade": DAYTRADE_FAMILIES}
@@ -135,18 +145,16 @@ def collect_lock_path(market: str) -> Path:
 
 
 @contextmanager
-def _collect_lock(market: str):
-    """Hold the market's collector lock (non-blocking): LabError if another run holds it.
+def _exclusive_lock(path: Path, message: str):
+    """Hold an flock on `path` (non-blocking): LabError(message) if another process holds it.
     The lock dies with its process, so a killed run never leaves a stale lock behind."""
-    path = collect_lock_path(market)
     path.parent.mkdir(parents=True, exist_ok=True)
     f = open(path, "a")
     try:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise LabError(f"`lab collect-minute --market {market}` is already running "
-                           f"(lock {path}): wait for it to finish") from None
+            raise LabError(message) from None
         try:
             yield
         finally:
@@ -155,9 +163,14 @@ def _collect_lock(market: str):
         f.close()
 
 
-def collect_running(market: str) -> bool:
-    """True while some process holds the market's collector lock."""
+def _collect_lock(market: str):
+    """The market's minute-collector lock: LabError if another run holds it."""
     path = collect_lock_path(market)
+    return _exclusive_lock(path, f"`lab collect-minute --market {market}` is already running "
+                                 f"(lock {path}): wait for it to finish")
+
+
+def _lock_held(path: Path) -> bool:
     if not path.exists():
         return False
     with open(path, "a") as f:
@@ -167,6 +180,16 @@ def collect_running(market: str) -> bool:
             return True
         fcntl.flock(f, fcntl.LOCK_UN)
         return False
+
+
+def collect_running(market: str) -> bool:
+    """True while some process holds the market's collector lock."""
+    return _lock_held(collect_lock_path(market))
+
+
+def events_running(market: str) -> bool:
+    """True while some process holds the market's `lab collect-events` lock."""
+    return _lock_held(events_lock_path(market))
 
 
 def _refuse_incomplete_minutes(market: str) -> None:
@@ -202,6 +225,72 @@ def _refuse_incomplete_minutes(market: str) -> None:
         raise LabError(f"benchmark {mc.benchmark} minute history starts {first.date()}, more "
                        f"than {MINUTE_START_TOLERANCE_DAYS} days after minute_start "
                        f"{mc.minute_start}: {fix}")
+
+
+def _refuse_incomplete_events(market: str) -> None:
+    """Event families screen / validate / verify / forward only on a finished filing
+    collection (contract R7): no `lab collect-events` running; targets.json present with a
+    non-empty `symbols` list (an older or empty file is NOT ready: `incomplete_targets` would
+    pass it); every mapped target `complete` in state.json (unmapped targets cannot be
+    fetched and are gated only through the coverage); and, when there are delisted targets,
+    delisted_mapped / delisted_targets >= MIN_DELISTED_COVERAGE. Checked before anything is
+    written (a premature screen fixes the periods file and logs trials for good)."""
+    fix = f"finish `lab collect-events --market {market}` first"
+    if events_running(market):
+        raise LabError(f"`lab collect-events --market {market}` is running: wait for it to "
+                       "finish (its filings are still changing)")
+    try:
+        t = read_json(targets_path(market), None)
+    except (OSError, ValueError) as e:
+        raise LabError(f"{market} event targets file is unreadable ({type(e).__name__}): "
+                       f"{fix}") from e
+    if not isinstance(t, dict) or not t.get("symbols"):
+        raise LabError(f"no {market} event targets recorded (targets.json missing or without "
+                       f"symbols): {fix}")
+    missing = incomplete_targets(market)
+    if missing:
+        raise LabError(f"{len(missing)} {market} event target(s) not complete "
+                       f"({', '.join(missing[:5])}{', ...' if len(missing) > 5 else ''}): "
+                       f"{fix}")
+    total, mapped = int(t.get("delisted_targets") or 0), int(t.get("delisted_mapped") or 0)
+    what = "delisted-target corp-code" if market == "kr" else "ticker->CIK mapping"
+    if total > 0 and mapped / total < MIN_DELISTED_COVERAGE:
+        raise LabError(f"{market} {what} coverage {mapped / total:.0%} "
+                       f"({mapped}/{total}) is below {MIN_DELISTED_COVERAGE:.0%}: report it "
+                       "before screening event rules (spec §10-1 #5)")
+    if market == "kr":          # an unfinished size pass would change the event set later
+        try:
+            have = set(load_sizes("kr")["filing_id"])
+            n = int((~size_targets(load_filings("kr"))["filing_id"].isin(have)).sum())
+        except Exception as e:          # corrupt store / invalid event table
+            raise LabError(f"{market} filings / sizes / event table unreadable "
+                           f"({type(e).__name__}: {str(e)[:120]}): {fix}") from e
+        if n:
+            raise LabError(f"{n} {market} filings still need size details: run "
+                           f"`lab collect-events --market {market}`")
+
+
+def _events_hash(market: str) -> str:
+    try:
+        return events_table_hash(market)
+    except FileNotFoundError as e:
+        raise ConfigError(f"event table for {market} is missing") from e
+
+
+def _refuse_changed_table(market: str, rule_id: str, metrics) -> None:
+    """An event-family rule is evaluated only on the event table its screen used: the logged
+    `events_table` (missing counts as changed) must equal the current table's hash."""
+    logged = metrics.get("events_table") if isinstance(metrics, dict) else None
+    if logged is None or logged != _events_hash(market):
+        raise LabError(f"events table changed since screen of {rule_id}: re-screen "
+                       "(new trials)")
+
+
+def _refuse_no_events(market: str) -> None:
+    """Event rules need Panel.events, which is None exactly when no filings are stored."""
+    if load_filings(market).empty:
+        raise LabError(f"no filings stored for {market}: event families need `lab "
+                       f"collect-events --market {market}` first")
 
 
 def cards_dir() -> Path:
@@ -367,10 +456,12 @@ def _refuse_opened_overlap(pocket: str, market: str, start: date, end: date,
                                 f"{s0}~{s1} already opened (rule {t.rule_id})")
 
 
-def _panel(s: Setup, end: date) -> Panel:
+def _panel(s: Setup, end: date, events: bool = False) -> Panel:
     """Prices from lab.history_start (signal warm-up before swing_start) through `end`; its
     `calendar` (trading dates only) is cut at the period record's data cutoff, so dates
-    collected later never change what a screen / validate / verify run computes."""
+    collected later never change what a screen / validate / verify run computes. Events are
+    attached only when `events` (an event family is involved): price-only runs must not
+    depend on the filings store or the event table."""
     p = load_panel(s.market.market, None, s.lab.history_start, end)
     idx = p.close.index
     # the daytrade calendar is the minute one: only the swing calendar mirrors the daily bars
@@ -379,7 +470,11 @@ def _panel(s: Setup, end: date) -> Panel:
         raise LabError("stored data changed while running; re-run the command")
     if p.calendar is not None:
         p = replace(p, calendar=p.calendar[p.calendar <= pd.Timestamp(s.record.data_cutoff)])
-    return p
+    # events with signal_date <= end only: no event dated after `end` (e.g. in the sealed
+    # period) reaches screen / validate. An event dated `end` itself is kept although it is
+    # tradable only at the next period's first open; harmless, simulate never fills an entry
+    # signalled on the panel's last row (e >= n)
+    return attach_events(p, s.market.market, end) if events else p
 
 
 def _eligible(s: Setup, panel: Panel, scenario: str) -> pd.DataFrame:
@@ -536,6 +631,49 @@ def _wait_for_daily_job() -> None:
     """The daily job holds data/logs/.lock while it runs: stay off the API until it is done."""
     while _daily_job_lock().exists():
         time.sleep(30)
+
+
+def events_report(market: str, unmatched: int = 20) -> dict:
+    """`lab events`: counts by event x year, target coverage, frequent unmatched titles."""
+    _check_market(market)
+    if load_filings(market).empty:
+        raise LabError(f"no filings stored for {market}: run `lab collect-events --market "
+                       f"{market}` first")
+    out = events_report_of(market, calendar(market)[0], unmatched)
+    out["incomplete"] = len(incomplete_targets(market))
+    return out
+
+
+def collect_events(market: str, limit: int | None = None) -> dict:
+    """Company filings (DART for KR, SEC EDGAR for US) of the swing paper-universe stocks into the event store.
+    Resumable per symbol; `limit` keeps the first N targets. One run per market at a time
+    (flock on events_root/.collect.lock). A DART rate limit stops the run cleanly."""
+    _check_market(market)
+    path = events_lock_path(market)
+    with _exclusive_lock(path, f"`lab collect-events --market {market}` is already running "
+                               f"(lock {path}): wait for it to finish"):
+        syms = event_targets(market)
+        if market == "us":
+            try:
+                return collect_events_us(make_edgar_client_from_env(), syms,
+                                         today=market_today(market).date(), limit=limit)
+            except httpx.HTTPError as e:
+                raise LabError(f"collect-events failed: network error ({type(e).__name__})"
+                               ) from e
+        meta = load_meta(market)
+        delisted = {str(s) for s in meta.index[meta["delisted"].astype(bool)]}
+        client = make_dart_client_from_env()
+        try:
+            out = collect_events_kr(client, syms, today=market_today(market).date(),
+                                    delisted=delisted, limit=limit)
+            if not out["rate_limited"]:             # sizes after listing, same run
+                sz = collect_sizes_kr(client)
+                out["sizes_added"] = sz["added"]
+                out["rate_limited"] = sz["rate_limited"]
+                out["sizes_stopped"] = sz["stopped"]
+            return out
+        except httpx.HTTPError as e:
+            raise LabError(f"collect-events failed: network error ({type(e).__name__})") from e
 
 
 def collect_minute(market: str, limit: int | None = None) -> dict:
@@ -708,20 +846,35 @@ def universe(market: str, pocket: str, scenario: str, day: date) -> list[str]:
 # ---------------------------------------------------------------- screen
 def screen(pocket: str, market: str, family: str = "all") -> pd.DataFrame:
     """Every grid point of the chosen families on the train period (fixed amount, paper
-    universe), logged as screen trials; sorted by mean_net_r."""
+    universe), logged as screen trials; sorted by mean_net_r. `family`: a name, `all` (the
+    non-event families) or `events` (registry.EVENT_FAMILIES). Event families need a finished
+    filing collection (`_refuse_incomplete_events`) and log `events_table` (the event-table
+    hash) with every row."""
     _check_market(market)
     fams = _families(pocket)
-    names = list(fams) if family == "all" else [family]
+    event_fams = [n for n in fams if n in EVENT_FAMILIES]
+    if family == "all":                    # the price families only (R11)
+        names = [n for n in fams if n not in EVENT_FAMILIES]
+    elif family == "events" and event_fams:
+        names = event_fams
+    else:
+        names = [family]
     for n in names:
         if n not in fams:
-            raise LabError(f"unknown family {n!r} (choose from all, {', '.join(fams)})")
+            raise LabError(f"unknown family {n!r} (choose from all, "
+                           f"{'events, ' if event_fams else ''}{', '.join(fams)})")
     if pocket == "daytrade":
         _check_market(market)
         _refuse_incomplete_minutes(market)
+    with_events = any(n in EVENT_FAMILIES for n in names)
+    if with_events:                        # before `_setup` writes the periods file
+        _refuse_incomplete_events(market)
+        _refuse_no_events(market)
+        table = _events_hash(market)
     s = _setup(pocket, market, create=True)
     t0, t1 = s.periods.train
     _refuse_opened_overlap(pocket, market, t0, t1, "screen")
-    panel = _panel(s, t1)
+    panel = _panel(s, t1, with_events)
     elig = _eligible(s, panel, "paper")
     cm = _cost_model(s.market, panel.meta)
     log = ExperimentLog(experiments_path())
@@ -736,8 +889,9 @@ def screen(pocket: str, market: str, family: str = "all") -> pd.DataFrame:
             frames.append(df.assign(family=n))
         return _screen_table(frames)
     for n in names:
+        extra = {"events_table": table} if n in EVENT_FAMILIES else None
         df = screen_family(n, panel, elig, t0, t1, cm, log, pocket, market,
-                           sealed_start=s.periods.sealed[0])
+                           sealed_start=s.periods.sealed[0], extra_metrics=extra)
         frames.append(df.assign(family=n))
     return _screen_table(frames)
 
@@ -811,7 +965,10 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     picks the candidates printed and recommended: the first `top` by train mean_net_r;
     recommend up to max_final_candidates of them with valid net_pnl > 0 and a valid return
     (net_pnl / capital) above the market benchmark's buy-and-hold return, by valid daily
-    Sharpe. Every run increments the period file's validate_runs counter.
+    Sharpe. Every run increments the period file's validate_runs counter. A pool holding an
+    event family needs a finished filing collection and, per event rule, a screen row logged
+    on the current event table (`_refuse_changed_table`); its validate rows log
+    `events_table` too.
 
     daytrade: the same pool / segments / PBO / logging, but the valid trades are the executed
     same-day trades of the rule on the valid period (minute bars loaded only through the valid
@@ -843,10 +1000,18 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
     if cands.empty:
         raise LabError(f"no screened rule has >= {MIN_TRAIN_TRADES} train trades")
     top_ids = list(cands["rule_id"].head(top))
+    with_events = cands["family"].isin(EVENT_FAMILIES).any()
+    if with_events:                        # before anything is written (validate_runs, log)
+        _refuse_incomplete_events(market)
+        _refuse_no_events(market)
+        table = _events_hash(market)
+        for fam, rid, m in zip(cands["family"], cands["rule_id"], cands["metrics"]):
+            if fam in EVENT_FAMILIES:
+                _refuse_changed_table(market, rid, m)
 
     (t0, _), (v0, v1) = s.periods.train, s.periods.valid
     _refuse_opened_overlap(pocket, market, t0, v1, "validate")
-    panel = _panel(s, v1)
+    panel = _panel(s, v1, bool(with_events))
     daytrade = pocket == "daytrade"
     cal = s.calendar if daytrade else panel.close.index
     elig = _eligible(s, panel, "paper")
@@ -917,6 +1082,8 @@ def validate(pocket: str, market: str, top: int) -> ValidateResult:
             "valid_mdd": max_drawdown(eq), "scenario": "paper", "capital_krw": capital,
             "capital_ccy": capital * cpk, "currency": s.market.currency, **extra,
         }
+        if fam in EVENT_FAMILIES:
+            metrics[rid]["events_table"] = table
     pbo = _pbo(pd.DataFrame(returns).fillna(0.0))
     ranked = sorted((rid for rid in top_ids if metrics[rid]["valid_net_pnl"] > 0
                      and (bench_ret is None or metrics[rid]["valid_return"] > bench_ret)),
@@ -1078,6 +1245,11 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
     if val.empty:
         raise LabError(f"rule {rule_id} has no validate record: run `lab validate` first")
     vrow = val.iloc[-1]
+    if scr.iloc[-1]["family"] in EVENT_FAMILIES:     # before the seal ticket is opened
+        _refuse_incomplete_events(market)
+        _refuse_no_events(market)
+        _refuse_changed_table(market, rule_id, scr.iloc[-1]["metrics"])
+        _refuse_changed_table(market, rule_id, vrow["metrics"])
     if list(vrow["period"]) != list(_iso(s.periods.valid)):
         raise LabError(f"stored data changed since validate (valid period "
                        f"{vrow['period'][0]}~{vrow['period'][1]} vs now "
@@ -1105,7 +1277,7 @@ def verify_final(pocket: str, market: str, rule_id: str) -> tuple[RuleCard, Path
                            data_cutoff=s.record.data_cutoff.isoformat(),
                            n_symbols=len(stored_symbols(market)), cycle=cycle,
                            allowed_rules=allowed)    # before any sealed price is read
-    panel = _panel(s, s.periods.sealed[1])
+    panel = _panel(s, s.periods.sealed[1], family in EVENT_FAMILIES)
     sealed = registry.load_sealed(panel, s.periods, ticket)  # validates the ticket
     if not sealed.close.index.equals(s.calendar[(s.calendar >= pd.Timestamp(
             s.periods.sealed[0]))]):

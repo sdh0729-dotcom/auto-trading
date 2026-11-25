@@ -41,13 +41,21 @@ class Panel:
     # the market's trading dates (dates only, no prices; may run past the panel's last row,
     # e.g. to tell whether that row is a month's last trading day); None if unknown
     calendar: pd.DatetimeIndex | None = None
+    # dated company events (autotrade.disclosure.events.EVENT_COLUMNS: one row per event,
+    # `signal_date` = the trading day whose next open is the first tradable one); None when
+    # no filings are stored. Only event rules read it.
+    events: pd.DataFrame | None = None
 
     def slice(self, start: date, end: date) -> "Panel":
-        """Inclusive on both ends; meta and calendar unchanged."""
+        """Inclusive on both ends (prices and events by signal_date); meta and calendar
+        unchanged."""
         s, e = pd.Timestamp(start), pd.Timestamp(end)
         f = lambda df: df.loc[(df.index >= s) & (df.index <= e)]
+        ev = self.events
+        if ev is not None:
+            ev = ev[(ev["signal_date"] >= s) & (ev["signal_date"] <= e)].reset_index(drop=True)
         return Panel(f(self.open), f(self.high), f(self.low), f(self.close),
-                     f(self.volume), self.meta, self.calendar)
+                     f(self.volume), self.meta, self.calendar, ev)
 
     @property
     def symbols(self) -> list[str]:

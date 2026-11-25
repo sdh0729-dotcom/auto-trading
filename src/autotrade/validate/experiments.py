@@ -53,6 +53,12 @@ class ExperimentLog:
 
     def n_trials(self, pocket: str, market: str) -> int:
         """Distinct rule_ids tried for this pocket x market (DSR trial count): every grid
-        point generated counts, including those the cost precheck skipped."""
+        point generated counts, including those the cost precheck skipped. An event-family
+        rule re-screened on a changed event table (another `events_table` hash in its
+        metrics) is a new trial (spec 2026-11-24 §8); rows without that key count by
+        rule_id alone, as before."""
         rows = self.rows(pocket, market)
-        return int(rows.loc[rows["stage"].isin(("screen", "precheck")), "rule_id"].nunique())
+        tried = rows[rows["stage"].isin(("screen", "precheck"))]
+        table = [m.get("events_table") if isinstance(m, dict) else None
+                 for m in tried["metrics"]]
+        return len(set(zip(tried["rule_id"], table)))

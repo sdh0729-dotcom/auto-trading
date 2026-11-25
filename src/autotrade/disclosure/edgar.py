@@ -10,10 +10,11 @@ Endpoints (no API key; SEC requires a descriptive `User-Agent` carrying a contac
    https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets/{year}q{q}_form345.zip
 
 ASSUMPTIONS (not verifiable offline; the controller checks them against real data):
- - A1 `acceptanceDateTime` ("2024-03-01T16:05:22.000Z") carries a "Z" but is Eastern wall-clock
-   time (EDGAR rolls `filingDate` to the next business day for acceptances after 17:30 ET,
-   which only lines up if the value is Eastern). `parse_acceptance` is the ONE place that
-   encodes this; if it turns out to be true UTC, change it there only.
+ - A1 `acceptanceDateTime` ("2024-03-01T16:05:22.000Z") is true UTC. CONFIRMED 2026-11-25 on
+   158,010 real filings (AAPL, MSFT, JPM, XOM, TSLA): read as UTC, acceptances fall in EDGAR's
+   06:00-22:00 New York hours, 99.9% of those before 17:30 ET carry that NY date as
+   `filingDate` and most after 17:30 ET roll to the next day; read as Eastern they would not.
+   `parse_acceptance` is the ONE place that encodes this.
  - A2 The zip holds NONDERIV_TRANS.tsv (tab separated) with ACCESSION_NUMBER, TRANS_CODE,
    TRANS_SHARES, TRANS_PRICEPERSHARE; a missing column raises EdgarError("insider layout").
    The Form 4 XML fallback (primaryDocument per filing) is NOT implemented: follow-up if A2
@@ -74,17 +75,15 @@ class EdgarNotFound(EdgarError):
 def parse_acceptance(value) -> pd.Timestamp:
     """EDGAR `acceptanceDateTime` -> tz-aware UTC Timestamp (NaT when empty/unparsable).
 
-    ASSUMPTION A1: the wall time in the string (its "Z" notwithstanding) is America/New_York
-    time. Ambiguous (fall-back hour) times take the first occurrence, non-existent
-    (spring-forward) times shift forward."""
+    A1 (confirmed on real data): the value is UTC as its "Z" says; a string without an offset
+    is read as UTC too."""
     if value is None or (isinstance(value, float) and pd.isna(value)) or not str(value).strip():
         return pd.NaT
     try:
         ts = pd.Timestamp(str(value).strip())
     except (ValueError, TypeError):
         return pd.NaT
-    ts = ts.tz_localize(None) if ts.tzinfo is not None else ts
-    return ts.tz_localize(NY, ambiguous=True, nonexistent="shift_forward").tz_convert("UTC")
+    return ts.tz_convert("UTC") if ts.tzinfo is not None else ts.tz_localize("UTC")
 
 
 class EdgarClient:

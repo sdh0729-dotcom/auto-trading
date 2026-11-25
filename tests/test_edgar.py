@@ -30,12 +30,12 @@ def cols(rows):
     return {k: [r.get(k, "") for r in rows] for k in keys}
 
 
-def test_parse_acceptance_is_new_york_wall_time():
-    # Z notwithstanding: 16:05:22 is Eastern (EST, UTC-5 in March before the DST start)
-    assert parse_acceptance("2024-03-01T16:05:22.000Z") == pd.Timestamp("2024-03-01 21:05:22",
+def test_parse_acceptance_is_utc():
+    # confirmed on real EDGAR data: the "Z" is honest (16:05:22Z = 11:05:22 EST)
+    assert parse_acceptance("2024-03-01T16:05:22.000Z") == pd.Timestamp("2024-03-01 16:05:22",
                                                                        tz="UTC")
-    # EDT in July: UTC-4
-    assert parse_acceptance("2024-07-02T09:29:00.000Z") == pd.Timestamp("2024-07-02 13:29",
+    # 13:29Z in July = 09:29 EDT, one minute before the open
+    assert parse_acceptance("2024-07-02T13:29:00.000Z") == pd.Timestamp("2024-07-02 13:29",
                                                                        tz="UTC")
     assert str(parse_acceptance("2024-03-01T16:05:22.000Z").tz) == "UTC"
     assert pd.isna(parse_acceptance("")) and pd.isna(parse_acceptance(None))
@@ -185,15 +185,15 @@ def env(tmp_path, monkeypatch):
 
 def fake():
     return FakeEdgar({"0000000001": [
-        sub("A-8k", "2024-02-01", "2024-02-01T08:30:00.000Z", "8-K", "1.01, 9.01"),
-        sub("A-8ka", "2024-02-02", "2024-02-02T08:30:00.000Z", "8-K/A", "1.01"),
-        sub("A-4", "2024-03-04", "2024-03-04T18:00:00.000Z", "4"),
-        sub("A-4b", "2024-03-05", "2024-03-05T18:00:00.000Z", "4"),
-        sub("A-10q", "2024-05-01", "2024-05-01T08:30:00.000Z", "10-Q"),
-        sub("A-old", "2014-12-31", "2014-12-31T08:30:00.000Z", "8-K", "1.01"),
-        sub("A-424", "2024-04-01", "2024-04-01T10:00:00.000Z", "424B5"),
-        sub("A-late", "2024-07-15", "2024-07-15T10:00:00.000Z", "8-K", "1.01"),   # 8-K: no horizon
-        sub("A-4late", "2024-07-16", "2024-07-16T18:00:00.000Z", "4"),            # beyond horizon
+        sub("A-8k", "2024-02-01", "2024-02-01T13:30:00.000Z", "8-K", "1.01, 9.01"),
+        sub("A-8ka", "2024-02-02", "2024-02-02T13:30:00.000Z", "8-K/A", "1.01"),
+        sub("A-4", "2024-03-04", "2024-03-04T23:00:00.000Z", "4"),
+        sub("A-4b", "2024-03-05", "2024-03-05T23:00:00.000Z", "4"),
+        sub("A-10q", "2024-05-01", "2024-05-01T12:30:00.000Z", "10-Q"),
+        sub("A-old", "2014-12-31", "2014-12-31T13:30:00.000Z", "8-K", "1.01"),
+        sub("A-424", "2024-04-01", "2024-04-01T14:00:00.000Z", "424B5"),
+        sub("A-late", "2024-07-15", "2024-07-15T14:00:00.000Z", "8-K", "1.01"),   # 8-K: no horizon
+        sub("A-4late", "2024-07-16", "2024-07-16T22:00:00.000Z", "4"),            # beyond horizon
     ]})
 
 
@@ -276,9 +276,9 @@ def test_insider_quarter_cached_on_disk(env):
 def test_collector_output_feeds_load_events(env):
     """Shapes cannot drift: collector rows -> classify -> signal dates -> sizes."""
     c = FakeEdgar({"0000000001": [
-        sub("A-8k", "2024-02-01", "2024-02-01T08:30:00.000Z", "8-K", "1.01,9.01"),    # pre-open
-        sub("A-301", "2024-02-06", "2024-02-06T10:00:00.000Z", "8-K", "3.01"),
-        sub("A-4", "2024-03-04", "2024-03-04T18:00:00.000Z", "4"),
+        sub("A-8k", "2024-02-01", "2024-02-01T13:30:00.000Z", "8-K", "1.01,9.01"),    # pre-open
+        sub("A-301", "2024-02-06", "2024-02-06T15:00:00.000Z", "8-K", "3.01"),
+        sub("A-4", "2024-03-04", "2024-03-04T23:00:00.000Z", "4"),
     ]})
     c.insider_quarter = lambda y, q: pd.DataFrame(
         {"accession": ["A-4"], "code": ["P"], "shares": [20000.0], "price": [10.0]})
@@ -294,7 +294,7 @@ def test_collector_output_feeds_load_events(env):
 
 def shared_fake(**kw):
     c = FakeEdgar({"0000000003": [
-        sub("G-8k", "2024-02-01", "2024-02-01T08:30:00.000Z", "8-K", "1.01")]}, **kw)
+        sub("G-8k", "2024-02-01", "2024-02-01T13:30:00.000Z", "8-K", "1.01")]}, **kw)
     return c
 
 
@@ -337,8 +337,8 @@ def test_insider_403_not_complete_and_no_nan_row(env):
             return super().insider_quarter(y, q)
 
     c = Forbidden({"0000000001": [
-        sub("A-4", "2024-03-04", "2024-03-04T18:00:00.000Z", "4"),
-        sub("A-8k", "2024-02-01", "2024-02-01T08:30:00.000Z", "8-K", "1.01")]})
+        sub("A-4", "2024-03-04", "2024-03-04T23:00:00.000Z", "4"),
+        sub("A-8k", "2024-02-01", "2024-02-01T13:30:00.000Z", "8-K", "1.01")]})
     with pytest.raises(EdgarError, match="403"):
         collect_events_us(c, ["AAPL"], today=TODAY)
     assert "AAPL" not in read_json(state_path("us"), {})
@@ -367,8 +367,8 @@ def test_shared_cik_sibling_with_earlier_start_gets_old_filings(env):
             return [r for r in rows if since is None or r["filingDate"] >= since.isoformat()]
 
     data = {"0000000003": [
-        sub("G-old", "2016-02-01", "2016-02-01T08:30:00.000Z", "8-K", "1.01"),
-        sub("G-new", "2024-06-10", "2024-06-10T08:30:00.000Z", "8-K", "1.01")]}
+        sub("G-old", "2016-02-01", "2016-02-01T13:30:00.000Z", "8-K", "1.01"),
+        sub("G-new", "2024-06-10", "2024-06-10T12:30:00.000Z", "8-K", "1.01")]}
     collect_events_us(Since(data), ["GOOG", "GOOGL"], today=date(2024, 6, 1), limit=1)
     collect_events_us(Since(data), ["GOOG", "GOOGL"], today=date(2024, 6, 20))
     df = load_filings("us")

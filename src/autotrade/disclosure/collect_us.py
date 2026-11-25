@@ -8,7 +8,7 @@ mapped/targets >= 0.80 instead of silently passing).
 
 Kept forms: 8-K, 8-K/A, 4, 424B1-424B8, filed on/after the start (2015-01-01).
 Raw columns: filing_id (accession), symbol, cik, filed_date, accepted_at (UTC, see
-edgar.parse_acceptance, assumption A1), form, items ("1.01,9.01" or ""), insider_usd.
+edgar.parse_acceptance; A1 confirmed: true UTC), form, items ("1.01,9.01" or ""), insider_usd.
 
 Insider amounts: only a Form 4 row carries `insider_usd` = sum(shares x price) over code-P
 rows of its accession (NaN otherwise). The amount comes from SEC's quarterly insider data

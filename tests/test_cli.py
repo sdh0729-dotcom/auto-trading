@@ -1229,3 +1229,14 @@ def test_validate_refuses_a_missing_benchmark(cli_env, monkeypatch):
     (store.data_root() / "kr" / "1d" / "069500.parquet").unlink()
     r = CliRunner().invoke(app, ["validate", "--pocket", "swing", "--market", "kr"])
     assert r.exit_code == 1 and "benchmark 069500" in r.output
+
+
+def test_collect_minute_shard_option_parsed(monkeypatch):
+    got = []
+    monkeypatch.setattr(pipeline, "collect_minute",
+                        lambda m, limit, shard: got.append((m, limit, shard))
+                        or {"symbols": 0, "added": 0, "complete": 0, "not_found": 0, "failed": 0})
+    r = CliRunner().invoke(app, ["collect-minute", "--market", "us", "--shard", "2/3"])
+    assert r.exit_code == 0 and got == [("us", None, (2, 3))]
+    r = CliRunner().invoke(app, ["collect-minute", "--market", "us", "--shard", "two"])
+    assert r.exit_code != 0 and "expected i/n" in r.output and len(got) == 1

@@ -21,6 +21,7 @@ import logging
 import math
 import os
 import time
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
@@ -140,19 +141,26 @@ def minute_limited_marker(market: str) -> Path:
 
 
 def collect_lock_path(market: str) -> Path:
-    """flock()ed by a running `lab collect-minute` for its whole run (one writer at a time)."""
+    """flock()ed by a running `lab collect-minute` for its whole run: exclusively by a full
+    (or --limit) run, shared by each --shard run (shards run together, never with a full run)."""
     return minute_root(market) / ".collect.lock"
 
 
+def collect_shard_lock_path(market: str, shard: tuple[int, int]) -> Path:
+    """flock()ed exclusively by the `lab collect-minute --shard i/n` run of that shard."""
+    return minute_root(market) / f".collect-shard-{shard[0]}of{shard[1]}.lock"
+
+
 @contextmanager
-def _exclusive_lock(path: Path, message: str):
-    """Hold an flock on `path` (non-blocking): LabError(message) if another process holds it.
-    The lock dies with its process, so a killed run never leaves a stale lock behind."""
+def _exclusive_lock(path: Path, message: str, shared: bool = False):
+    """Hold an flock on `path` (non-blocking; exclusive, or shared when `shared`):
+    LabError(message) if another process holds a conflicting lock. The lock dies with its
+    process, so a killed run never leaves a stale lock behind."""
     path.parent.mkdir(parents=True, exist_ok=True)
     f = open(path, "a")
     try:
         try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(f, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
         except BlockingIOError:
             raise LabError(message) from None
         try:
@@ -163,19 +171,34 @@ def _exclusive_lock(path: Path, message: str):
         f.close()
 
 
-def _collect_lock(market: str):
-    """The market's minute-collector lock: LabError if another run holds it."""
+def _collect_lock(market: str, shared: bool = False):
+    """The market's minute-collector lock: LabError if a conflicting run holds it."""
     path = collect_lock_path(market)
     return _exclusive_lock(path, f"`lab collect-minute --market {market}` is already running "
-                                 f"(lock {path}): wait for it to finish")
+                                 f"(lock {path}): wait for it to finish", shared)
+
+
+@contextmanager
+def _collect_locks(market: str, shard: tuple[int, int] | None):
+    """A full run: the market lock, exclusive. A shard run: the market lock shared (other
+    shards may run, a full run may not) plus its own shard lock, exclusive."""
+    if shard is None:
+        with _collect_lock(market):
+            yield
+        return
+    with _collect_lock(market, shared=True):
+        path = collect_shard_lock_path(market, shard)
+        with _exclusive_lock(path, f"`lab collect-minute --market {market} --shard "
+                                   f"{shard[0]}/{shard[1]}` is already running (lock {path})"):
+            yield
 
 
 def _lock_held(path: Path) -> bool:
     if not path.exists():
         return False
     with open(path, "a") as f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        try:                    # exclusive probe: any holder (shared or exclusive) blocks it
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return True
         fcntl.flock(f, fcntl.LOCK_UN)
@@ -203,9 +226,9 @@ def _refuse_incomplete_minutes(market: str) -> None:
         raise LabError(f"`lab collect-minute --market {market}` is running: wait for it to "
                        "finish (its minute data is still changing)")
     if minute_limited_marker(market).exists():
-        raise LabError(f"{market} minute data comes from `lab collect-minute --limit` "
-                       f"(partial symbol set): run a full `lab collect-minute --market "
-                       f"{market}` first")
+        raise LabError(f"{market} minute data comes from `lab collect-minute --limit` or "
+                       f"`--shard` (partial symbol set): run a full `lab collect-minute "
+                       f"--market {market}` first")
     root = minute_root(market)
     dirs = sorted(p for p in root.iterdir() if p.is_dir()) if root.exists() else []
     partial = [p.name for p in dirs if not (p / COMPLETE_MARKER).exists()]
@@ -676,7 +699,14 @@ def collect_events(market: str, limit: int | None = None) -> dict:
             raise LabError(f"collect-events failed: network error ({type(e).__name__})") from e
 
 
-def collect_minute(market: str, limit: int | None = None) -> dict:
+def shard_of(symbol: str, n: int) -> int:
+    """1-based shard of `symbol` among `n`: from the name alone (crc32), so it never depends
+    on the rest of the day's symbol list."""
+    return zlib.crc32(symbol.encode("utf-8")) % n + 1
+
+
+def collect_minute(market: str, limit: int | None = None,
+                   shard: tuple[int, int] | None = None) -> dict:
     """1-minute bars back to the market's minute_start for the daily universe symbols
     (top lab.universe_top_n on any day since then, plus always_include), most universe days
     first. Resumable; `limit` keeps the first N symbols and marks the minute data as partial
@@ -684,23 +714,40 @@ def collect_minute(market: str, limit: int | None = None) -> dict:
     the end. Skips stock-not-found symbols; MAX_CONSECUTIVE_FAILURES in a row (or a Toss
     401/403) abort. One run per market at a time: the whole run holds `collect_lock_path`
     (flock), a second run refuses to start (two writers would merge and rewrite the same
-    month files and drop each other's bars)."""
+    month files and drop each other's bars).
+
+    `shard=(i, n)` (n >= 2) collects only the symbols with `shard_of(symbol, n) == i`;
+    different shards run at the same time (disjoint symbols, so disjoint files), the same
+    shard twice or a full run alongside any shard refuse to start. A shard run marks the data
+    partial like `limit`; the full run that follows the shards (fast: finished symbols only
+    fetch their newest pages) checks every symbol and clears the marker."""
     _check_market(market)
+    if shard is not None:
+        i, n = shard
+        if n < 2 or not 1 <= i <= n:
+            raise LabError(f"--shard {i}/{n}: need 1 <= i <= n and n >= 2")
+        if limit is not None:
+            raise LabError("--shard and --limit cannot be combined")
     mc = load_market_raw(market)
     if mc.minute_start is None:
         raise LabError(f"{market} has no minute_start in its config")
-    with _collect_lock(market):
-        return _collect_minute_locked(market, mc, limit)
+    with _collect_locks(market, shard):
+        return _collect_minute_locked(market, mc, limit, shard)
 
 
-def _collect_minute_locked(market: str, mc: MarketConfig, limit: int | None) -> dict:
+def _collect_minute_locked(market: str, mc: MarketConfig, limit: int | None,
+                           shard: tuple[int, int] | None = None) -> dict:
     today = market_today(market)
     syms = minute_symbols(market, mc.minute_start, today.date(), load_lab().universe_top_n)
     marker = minute_limited_marker(market)
-    if limit is not None:
-        syms = syms[:limit]
+    if limit is not None or shard is not None:
+        if limit is not None:
+            syms, note = syms[:limit], f"--limit {limit}"
+        else:
+            syms = [x for x in syms if shard_of(x, shard[1]) == shard[0]]
+            note = f"--shard {shard[0]}/{shard[1]}"
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(f"lab collect-minute --limit {limit}\n", encoding="utf-8")
+        marker.write_text(f"lab collect-minute {note}\n", encoding="utf-8")
     client = _client()
     out = {"symbols": len(syms), "added": 0, "complete": 0, "not_found": 0, "failed": 0}
     failed: list[str] = []
@@ -730,7 +777,7 @@ def _collect_minute_locked(market: str, mc: MarketConfig, limit: int | None) -> 
     except httpx.HTTPError as e:
         raise LabError(f"collect-minute failed: network error ({type(e).__name__})") from e
     out["failed"] = len(failed)
-    if limit is None:               # a full run went over every symbol
+    if limit is None and shard is None:     # a full run went over every symbol
         marker.unlink(missing_ok=True)
     return out
 

@@ -374,3 +374,100 @@ def test_aborted_full_run_keeps_the_limited_marker(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         pipeline.collect_minute("kr", None)
     assert pipeline.minute_limited_marker("kr").exists()
+
+
+def _fake_shard_run(monkeypatch, seen, syms):
+    from autotrade import pipeline
+    monkeypatch.setattr(pipeline, "_client", lambda: object())
+    monkeypatch.setattr(pipeline, "minute_symbols", lambda *a, **k: list(syms))
+    monkeypatch.setattr(pipeline, "collect_minutes",
+                        lambda c, m, s, since, today: seen.append(s) or cm.MinuteReport(1, True))
+    return pipeline
+
+
+SYMS = [f"S{i:03d}" for i in range(60)]
+
+
+def test_shards_partition_the_symbols_by_name(monkeypatch):
+    import zlib
+    parts = []
+    for i in (1, 2, 3):
+        seen = []
+        pipeline = _fake_shard_run(monkeypatch, seen, SYMS)
+        out = pipeline.collect_minute("kr", None, shard=(i, 3))
+        assert out["symbols"] == len(seen)
+        assert all(zlib.crc32(s.encode()) % 3 == i - 1 for s in seen)
+        parts.append(seen)
+    assert sorted(sum(parts, [])) == SYMS and all(parts)       # disjoint, complete, non-empty
+    # a symbol's shard does not depend on the rest of the list (a later day's universe)
+    seen = []
+    pipeline = _fake_shard_run(monkeypatch, seen, list(reversed(SYMS))[:25])
+    pipeline.collect_minute("kr", None, shard=(1, 3))
+    assert set(seen) <= set(parts[0])
+
+
+def test_shards_run_together_but_a_full_run_or_the_same_shard_refuses(monkeypatch):
+    from autotrade import pipeline as pl
+    inner = {}
+
+    def nested(c, m, s, since, today):
+        if not inner:
+            inner["running"] = pl.collect_running(m)
+            for key, kw in (("full", {}), ("same", {"shard": (1, 2)}), ("other", {"shard": (2, 2)})):
+                try:
+                    monkeypatch.setattr(pl, "collect_minutes",
+                                        lambda *a: cm.MinuteReport(0, True))
+                    pl.collect_minute(m, None, **kw)
+                    inner[key] = "ran"
+                except pl.LabError as e:
+                    inner[key] = str(e)
+                finally:
+                    monkeypatch.setattr(pl, "collect_minutes", nested)
+        return cm.MinuteReport(1, True)
+
+    _fake_shard_run(monkeypatch, [], SYMS)
+    monkeypatch.setattr(pl, "collect_minutes", nested)
+    pl.collect_minute("kr", None, shard=(1, 2))
+    assert inner["running"] is True
+    assert "already running" in inner["full"] and "already running" in inner["same"]
+    assert inner["other"] == "ran"
+    assert not pl.collect_running("kr")
+
+
+def test_a_full_run_blocks_every_shard(monkeypatch):
+    import fcntl
+    seen = []
+    pipeline = _fake_shard_run(monkeypatch, seen, SYMS)
+    path = pipeline.collect_lock_path("kr")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as other:                     # a full run in another process
+        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(pipeline.LabError, match="already running"):
+            pipeline.collect_minute("kr", None, shard=(1, 2))
+    assert seen == []
+
+
+def test_shard_run_marks_partial_and_only_a_full_run_clears(monkeypatch):
+    seen = []
+    pipeline = _fake_shard_run(monkeypatch, seen, SYMS)
+    marker = pipeline.minute_limited_marker("kr")
+    pipeline.collect_minute("kr", None, shard=(1, 2))
+    pipeline.collect_minute("kr", None, shard=(2, 2))
+    assert marker.exists() and "--shard" in marker.read_text()
+    pipeline.collect_minute("kr", None)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("shard", [(0, 2), (3, 2), (1, 1), (1, 0)])
+def test_bad_shard_refused(monkeypatch, shard):
+    seen = []
+    pipeline = _fake_shard_run(monkeypatch, seen, SYMS)
+    with pytest.raises(pipeline.LabError, match="shard"):
+        pipeline.collect_minute("kr", None, shard=shard)
+    assert seen == []
+
+
+def test_shard_and_limit_together_refused(monkeypatch):
+    pipeline = _fake_shard_run(monkeypatch, [], SYMS)
+    with pytest.raises(pipeline.LabError, match="shard"):
+        pipeline.collect_minute("kr", 5, shard=(1, 2))

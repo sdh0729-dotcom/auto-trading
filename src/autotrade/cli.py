@@ -77,9 +77,19 @@ def sync(kr_commission: Optional[float] = typer.Option(
 @app.command("collect-minute")
 @_expected_errors
 def collect_minute(market: str = typer.Option(..., help="kr | us"),
-                   limit: Optional[int] = typer.Option(None, help="first N symbols only")):
+                   limit: Optional[int] = typer.Option(None, help="first N symbols only"),
+                   shard: Optional[str] = typer.Option(
+                       None, help="i/n: only shard i of n (run shards side by side, then one "
+                                  "full run)")):
     """1-minute bars for the daily universe (resumable; waits while the daily job runs)."""
-    s = pipeline.collect_minute(market, limit)
+    sh = None
+    if shard is not None:
+        try:
+            a, b = shard.split("/")
+            sh = (int(a), int(b))
+        except ValueError:
+            raise pipeline.LabError(f"--shard {shard!r}: expected i/n, e.g. 1/3") from None
+    s = pipeline.collect_minute(market, limit, sh)
     typer.echo(f"symbols {s['symbols']}, added {s['added']} | complete {s['complete']}, "
                f"not found {s['not_found']}, failed {s['failed']}")
 

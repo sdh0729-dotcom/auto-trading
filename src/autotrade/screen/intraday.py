@@ -1,7 +1,10 @@
 """Intraday executor: per-symbol day-trade candidates -> same-day trades on 1-minute bars.
 
 Bars are END-stamped: a signal from the bar ending `signal_ts` fills at the open of the next
-existing bar (never the signal bar). Prices are raw bar prices; costs come later.
+bar with trades (never the signal bar). A bar with no volume (Toss emits flat zero-volume bars
+repeating the last price) never fills: entries move on, exits are deferred as in a VI halt.
+Only the forced session exit may fill on such a bar. Prices are raw bar prices; costs come
+later.
 """
 from __future__ import annotations
 
@@ -84,7 +87,7 @@ def vi_halts(bars_day: pd.DataFrame, prev_close: float, dynamic_pct: float,
 def _walk(o, h, l, c, i0, i_end, i_sig, stop_pct, target_pct, halted=None):
     """Walk bars i0..i_end; return (exit_idx, exit_price, reason). Entry at o[i0].
 
-    Fills on a halted bar are deferred to the open of the first non-halted bar: a pending
+    `halted` marks bars where nothing can fill (VI auction or no trades). Fills on such a bar are deferred to the open of the first non-halted bar: a pending
     stop fills there even below the stop, a pending target only if that open >= target
     (else the walk continues), a pending signal exit fills there.
     """
@@ -145,6 +148,7 @@ def execute(symbol: str, bars: pd.DataFrame, cands: pd.DataFrame, rules: Session
         ends_all = idx.as_unit("ns").asi8
         day_all = idx.normalize().tz_localize(None).as_unit("ns").asi8
         O, H, L, C = (bars[k].to_numpy(float) for k in ("open", "high", "low", "close"))
+        traded_all = bars["volume"].to_numpy(float) > 0     # NaN volume: not traded
         cday = pd.DatetimeIndex(cands["day"]).normalize()
         sess = sessions(_market_of_tz(idx.tz), cday.min(), cday.max())
         lead = pd.Timedelta(minutes=rules.exit_lead_minutes).value
@@ -168,6 +172,7 @@ def execute(symbol: str, bars: pd.DataFrame, cands: pd.DataFrame, rules: Session
                 continue
             ts = idx[lo:hi]
             o, h, l, c, ends = O[lo:hi], H[lo:hi], L[lo:hi], C[lo:hi], ends_all[lo:hi]
+            traded = traded_all[lo:hi]
             i_end = int(np.searchsorted(ends, s_close - lead, side="right")) - 1
             if i_end < 0:
                 continue
@@ -177,7 +182,8 @@ def execute(symbol: str, bars: pd.DataFrame, cands: pd.DataFrame, rules: Session
                 pc = prev_close.get(day) if isinstance(prev_close, pd.Series) else prev_close
                 if pc is not None and np.isfinite(pc):
                     halted = _vi_mask(ends, o, h, l, c, pc, dyn, vi)
-                    halted[i_end:] = False      # the closing auction is never halted
+            blocked = ~traded if halted is None else (~traded | halted)
+            blocked[i_end:] = False         # the forced session exit always fills
             free_after = None   # exit bar end (ns) of the open/last trade
             for r in group.itertuples(index=False):
                 sig = pd.Timestamp(r.signal_ts)
@@ -186,9 +192,9 @@ def execute(symbol: str, bars: pd.DataFrame, cands: pd.DataFrame, rules: Session
                 if free_after is not None and sig.value < free_after:
                     continue
                 i0 = int(np.searchsorted(ends, sig.value, side="right"))
-                if halted is not None:
-                    while i0 < len(ts) and halted[i0]:
-                        i0 += 1
+                while i0 < len(ts) and (not traded[i0] or (halted is not None and halted[i0]
+                                                           and i0 < i_end)):
+                    i0 += 1
                 if i0 >= len(ts) or i0 > i_end:
                     continue
                 if last_entry is not None and ends[i0] > last_entry:
@@ -199,7 +205,7 @@ def execute(symbol: str, bars: pd.DataFrame, cands: pd.DataFrame, rules: Session
                                                     side="right")) - 1, i0)
                     i_sig = min(i_sig, i_end)
                 i, px, why = _walk(o, h, l, c, i0, i_end, i_sig, float(r.stop_pct),
-                                   float(r.target_pct), halted)
+                                   float(r.target_pct), blocked)
                 free_after = ends[i]
                 rows.append({"symbol": symbol, "entry_date": ts[i0], "entry_price": o[i0],
                              "exit_date": ts[i], "exit_price": float(px), "exit_reason": why,

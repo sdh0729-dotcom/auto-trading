@@ -288,3 +288,55 @@ def test_etf_never_halts_and_no_vi_without_inputs():
     ser = pd.Series({pd.Timestamp(D): 100.0})
     r = execute("A", b, c, VI_RULES, prev_close=ser).iloc[0]
     assert r.exit_date == pd.Timestamp(f"{D} 15:30", tz=KR) and r.exit_price == 94
+
+
+def no_trade(b, *times):
+    """Mark the bars ending at `times` as having no trades (Toss: flat, volume 0)."""
+    b = b.copy()
+    for t in times:
+        b.loc[pd.Timestamp(f"{D} {t}", tz=KR), "volume"] = 0.0
+    return b
+
+
+def test_entry_skips_bars_without_trades():
+    b = no_trade(bars(D, [flat("09:01"), flat("09:02"), flat("09:03"),
+                          ("09:04", 103, 103, 103, 103), flat("15:30", 104)]),
+                 "09:02", "09:03")
+    r = execute("A", b, cands(cand(D, "09:01")), KR_RULES).iloc[0]
+    assert r.entry_price == 103 and r.entry_date == pd.Timestamp(f"{D} 09:04", tz=KR)
+
+
+def test_entry_dropped_when_no_traded_bar_before_last_entry():
+    b = no_trade(bars(D, [flat("15:18"), flat("15:19"), flat("15:20"), flat("15:25"),
+                          flat("15:30")]), "15:19", "15:20")
+    assert execute("A", b, cands(cand(D, "15:18")), KR_RULES).empty
+
+
+def test_entry_never_on_an_untraded_session_exit_bar():
+    rules = SessionRules(last_entry_lead=None, exit_lead_minutes=0, vi=None)
+    b = no_trade(bars(D, [flat("15:28"), flat("15:29"), flat("15:30")]), "15:29", "15:30")
+    assert execute("A", b, cands(cand(D, "15:28")), rules).empty
+
+
+def test_signal_exit_on_an_untraded_bar_fills_at_next_traded_open():
+    b = no_trade(bars(D, [flat("09:01"), flat("09:02"), flat("09:03"),
+                          ("09:04", 101, 101, 101, 101), flat("15:30", 102)]), "09:03")
+    c = cands(cand(D, "09:01", exit_ts=pd.Timestamp(f"{D} 09:03", tz=KR)))
+    r = execute("A", b, c, KR_RULES).iloc[0]
+    assert r.exit_reason == "signal" and r.exit_price == 101
+    assert r.exit_date == pd.Timestamp(f"{D} 09:04", tz=KR)
+
+
+def test_session_exit_still_fills_on_an_untraded_last_bar():
+    b = no_trade(bars(D, [flat("09:01"), flat("09:02"), flat("15:30", 100)]), "15:30")
+    r = execute("A", b, cands(cand(D, "09:01")), KR_RULES).iloc[0]
+    assert r.exit_reason == "session_end"
+    assert r.exit_date == pd.Timestamp(f"{D} 15:30", tz=KR)
+
+
+def test_untraded_bars_after_a_vi_defer_entry_further():
+    b = no_trade(bars(D, [flat("09:01"), ("09:02", 100, 107, 100, 106), flat("09:03", 106),
+                          flat("09:04", 106), flat("09:05", 107), flat("09:06", 108),
+                          flat("15:30", 108)]), "09:05")
+    r = execute("A", b, cands(cand(D, "09:02")), VI_RULES, prev_close=100.0).iloc[0]
+    assert r.entry_date == pd.Timestamp(f"{D} 09:06", tz=KR) and r.entry_price == 108

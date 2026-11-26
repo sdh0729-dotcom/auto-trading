@@ -1,15 +1,24 @@
-# US event table, first draft (spec 2026-11-24-disclosure-lab-design.md §6.1, §10-1 #2, #7).
+# US event table (spec 2026-11-24-disclosure-lab-design.md §6.1, §10-1 #2, #7).
 # Patterns are matched (re.search) against "<form>|<items>" (items without spaces), e.g.
 # "8-K|1.01,9.01", "4|", "424B5|"; first match wins (negatives first: an 8-K carrying both
-# 1.01 and 3.01/4.02 is the negative event). Amendments (form ending in /A) are corrections,
-# never events. `require_positive: <column>`: the row matches only when that filing column
-# is > 0 (Form 4 rows without code-P open-market buys carry NaN insider_usd).
+# 1.01 and a negative item is the negative event). Amendments (form ending in /A) are
+# corrections, never events. `require_positive: <column>`: the row matches only when that
+# filing column is > 0 (Form 4 rows without code-P open-market buys carry NaN insider_usd).
+# Finalized 2026-11-26 with the user from form/item frequencies only (no prices / returns seen):
+# draft rows + 8-K 1.03 bankruptcy, 2.04 debt acceleration, 2.06 impairment, 4.01 auditor
+# change, 1.02 contract termination as negatives. Left out as direction-ambiguous: 2.01, 2.02,
+# 2.05, 3.03, 5.01, 5.02, 7.01, 8.01. 424B stays record-only (direction 0).
 # Changing this file after screening starts = a new experiment (events_table hash changes).
 repeat_days: 20
 negative_window: 20
 events:
+  - {name: 8k_103, direction: -1, match: '^8-K\|(.*,)?1\.03(,|$)'}
   - {name: 8k_402, direction: -1, match: '^8-K\|(.*,)?4\.02(,|$)'}
   - {name: 8k_301, direction: -1, match: '^8-K\|(.*,)?3\.01(,|$)'}
+  - {name: 8k_204, direction: -1, match: '^8-K\|(.*,)?2\.04(,|$)'}
+  - {name: 8k_206, direction: -1, match: '^8-K\|(.*,)?2\.06(,|$)'}
+  - {name: 8k_401, direction: -1, match: '^8-K\|(.*,)?4\.01(,|$)'}
+  - {name: 8k_102, direction: -1, match: '^8-K\|(.*,)?1\.02(,|$)'}
   - {name: 8k_101, direction: 1, match: '^8-K\|(.*,)?1\.01(,|$)'}
   - {name: offering_424b, direction: 0, match: '^424B[1-8]\|'}
   - {name: insider_buy, direction: 1, match: '^4\|', require_positive: insider_usd, size: insider_usd, size_min: 100000}
